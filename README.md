@@ -96,3 +96,4 @@ model-usage/
 │       ├── reload.ts                 # Stale-load guard
 │       └── scroll.ts                 # Scroll state management
 └── tests/                            # Unit tests
+```
