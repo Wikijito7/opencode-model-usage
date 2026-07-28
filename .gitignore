@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Backup files
+*~
+*.backup
+*.bak
+
+# Dependencies
+node_modules/
+.bun/
+
+# Build output
+dist/
+build/
+out/
+
+# Environment
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo

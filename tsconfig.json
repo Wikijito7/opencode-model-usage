@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
+    "paths": {
+      "@model-usage/*": ["./model-usage/*"]
+    }
+  }
+}
