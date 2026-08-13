@@ -5,7 +5,7 @@ import { homedir } from "node:os"
 import { Database } from "bun:sqlite"
 
 import { onMount, onCleanup, createSignal, createEffect } from "solid-js"
-import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo } from "./helpers/dates"
+import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets } from "./helpers/dates"
 import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
 import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
@@ -14,7 +14,7 @@ import { registerDialogKeyLayer } from "./wlib/keys"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
-import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache } from "./cache"
+import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs } from "./cache"
 import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal } from "./usage-domain"
 
 export function registerUsageCommand(api: TuiPluginApi) {
@@ -64,35 +64,11 @@ export function registerUsageCommand(api: TuiPluginApi) {
             return
           }
 
-          let minMonthOffset = 0
-          let minWeekOffset = 0
-          let minDayOffset = 0
-          {
-            const earliestMs = getEarliestUsageDate(db)
-            if (earliestMs != null) {
-              const earliestDate = new Date(earliestMs)
-              const earliestYear = earliestDate.getUTCFullYear()
-              const earliestMonth = earliestDate.getUTCMonth()
-              const currentYear = now.getUTCFullYear()
-              const currentMonth = now.getUTCMonth()
-              const monthsBack = (currentYear * 12 + currentMonth) - (earliestYear * 12 + earliestMonth)
-              minMonthOffset = -monthsBack
-
-              const earliestWeekMonday = getWeekMonday(earliestDate).getTime()
-              const currentWeekMonday = getWeekMonday(new Date()).getTime()
-              if (earliestWeekMonday < currentWeekMonday) {
-                const diffWeeks = Math.floor((currentWeekMonday - earliestWeekMonday) / (7 * MS_PER_DAY))
-                minWeekOffset = -diffWeeks
-              }
-
-              const earliestDayStart = Date.UTC(earliestDate.getUTCFullYear(), earliestDate.getUTCMonth(), earliestDate.getUTCDate())
-              const currentDayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
-              if (earliestDayStart < currentDayStart) {
-                const diffDays = Math.floor((currentDayStart - earliestDayStart) / MS_PER_DAY)
-                minDayOffset = -diffDays
-              }
-            }
-          }
+          const cachedEarliest = getCachedEarliestTs()
+          const initOffsets = computeMinOffsets(cachedEarliest, now)
+          const [minMonthOffset, setMinMonthOffset] = createSignal(initOffsets.minMonthOffset)
+          const [minWeekOffset, setMinWeekOffset] = createSignal(initOffsets.minWeekOffset)
+          const [minDayOffset, setMinDayOffset] = createSignal(initOffsets.minDayOffset)
 
           const [granularity, setGranularity] = createSignal<Granularity>("month")
           const [monthOffset, setMonthOffset] = createSignal(0)
@@ -139,125 +115,20 @@ export function registerUsageCommand(api: TuiPluginApi) {
             setDiffInfo(formatPercentDiff(currentTotal, prev))
           }
 
-          function loadData(forceRefresh: boolean = false) {
-            const { startMs, endMs } = computeWindow()
-            const gran = granularity()
-            const cacheKey = modelCacheKey(gran, startMs)
-
-            if (!forceRefresh) {
-              const cachedModelData = modelCache.get(cacheKey)
-              if (cachedModelData) {
-                setViewState(cachedModelData)
-                const currentTotal = cachedModelData.totalInput + cachedModelData.totalOutput
-                computeAndSetDiff(startMs, currentTotal)
-                if (!hasLoadedOnce()) setHasLoadedOnce(true)
-                return
+          // ── Shared background pipeline (hierarchy build + forward prefetch) ──
+          function scheduleHierarchyBuild(startMs: number, endMs: number, gran: Granularity) {
+            if (gran !== "month") return
+            setTimeout(() => {
+              if (cleanedUp || !db) return
+              const rowsResult = fetchRawRows(db, startMs, endMs)
+              if (!("error" in rowsResult)) {
+                const period = buildHierarchy(rowsResult, startMs, endMs)
+                updateMonthCache(period)
               }
-            }
+            }, 0)
+          }
 
-            if (!forceRefresh && gran === "month") {
-              const fileCached = getMonthCache(startMs)
-              if (fileCached) {
-                const models = fileCached.models ?? []
-                const isCurrent = isCurrentMonth(startMs)
-                const isStale = isCurrent && (Date.now() - fileCached.lastUpdated) >= CACHE_TTL_MS
-                if (!isStale) {
-                  const data: UsageData = {
-                    models,
-                    totalInput: fileCached.inputTokens,
-                    totalOutput: fileCached.outputTokens,
-                    totalCost: fileCached.totalCost,
-                  }
-                  setViewState(data)
-                  modelCache.set(cacheKey, data)
-
-                  const currentTotal = fileCached.inputTokens + fileCached.outputTokens
-                  computeAndSetDiff(startMs, currentTotal)
-
-                  if (!hasLoadedOnce()) setHasLoadedOnce(true)
-                  return
-                }
-              }
-            } else if (!forceRefresh && (gran === "week" || gran === "day")) {
-              const monthStart = Date.UTC(new Date(startMs).getUTCFullYear(), new Date(startMs).getUTCMonth(), 1)
-              const monthCached = getMonthCache(monthStart)
-              const periodList = gran === "week" ? monthCached?.weeks : monthCached?.days
-              const period = periodList?.find(p => p.startMs === startMs)
-              if (period) {
-                const models = period.models ?? []
-                const isCurrent = gran === "week" ? weekOffset() === 0 : dayOffset() === 0
-                const isStale = isCurrent && (Date.now() - period.lastUpdated) >= CACHE_TTL_MS
-                if (!isStale) {
-                  const data: UsageData = {
-                    models,
-                    totalInput: period.inputTokens,
-                    totalOutput: period.outputTokens,
-                    totalCost: period.totalCost,
-                  }
-                  setViewState(data)
-                  modelCache.set(cacheKey, data)
-
-                  const currentTotal = period.inputTokens + period.outputTokens
-                  computeAndSetDiff(startMs, currentTotal)
-
-                  // Prefill adjacent model cache from hierarchy (sync, no DB)
-                  const periodMs = gran === "week" ? 7 * MS_PER_DAY : MS_PER_DAY
-                  const nextStart = startMs + periodMs
-                  const nextKey = modelCacheKey(gran, nextStart)
-                  if (!modelCache.has(nextKey)) {
-                    let adjPeriod: CachePeriod | undefined
-                    adjPeriod = periodList?.find(p => p.startMs === nextStart)
-                    if (!adjPeriod) {
-                      const adjMonthStart = Date.UTC(new Date(nextStart).getUTCFullYear(), new Date(nextStart).getUTCMonth(), 1)
-                      const adjCached = getMonthCache(adjMonthStart)
-                      const adjList2 = gran === "week" ? adjCached?.weeks : adjCached?.days
-                      adjPeriod = adjList2?.find(p => p.startMs === nextStart)
-                    }
-                    if (adjPeriod) {
-                      modelCache.set(nextKey, {
-                        models: adjPeriod.models,
-                        totalInput: adjPeriod.inputTokens,
-                        totalOutput: adjPeriod.outputTokens,
-                        totalCost: adjPeriod.totalCost,
-                      })
-                    }
-                  }
-
-                  if (!hasLoadedOnce()) setHasLoadedOnce(true)
-                  return
-                }
-              }
-            }
-
-            // ── Fallback: cache miss ──────────────────────────────────
-            // Step 1: Fast SQL GROUP BY for display
-            if (!db) return
-            const usageResult = queryUsage(db, startMs, endMs)
-            if ("error" in usageResult) {
-              setErrorMsg(usageResult.error)
-              setViewState("error")
-              if (!hasLoadedOnce()) setHasLoadedOnce(true)
-              return
-            }
-            const usageData = usageResult
-            modelCache.set(modelCacheKey(granularity(), startMs), usageData)
-            setViewState(usageData)
-            computeAndSetDiff(startMs, usageData.totalInput + usageData.totalOutput)
-            if (!hasLoadedOnce()) setHasLoadedOnce(true)
-
-            // Step 2: Background hierarchy building (async, non-blocking)
-            if (gran === "month") {
-              setTimeout(() => {
-                if (cleanedUp || !db) return
-                const rowsResult = fetchRawRows(db, startMs, endMs)
-                if (!("error" in rowsResult)) {
-                  const period = buildHierarchy(rowsResult, startMs, endMs)
-                  updateMonthCache(period)
-                }
-              }, 0)
-            }
-
-            // Step 3: Prefetch forward (async)
+          function schedulePrefetch(startMs: number, endMs: number) {
             setTimeout(() => {
               if (cleanedUp || !db) return
               const nextGran = granularity()
@@ -286,18 +157,140 @@ export function registerUsageCommand(api: TuiPluginApi) {
             }, PREFETCH_DELAY_MS)
           }
 
+          // Step 1 query + shared Step 2/3. `background` suppresses error rendering so a
+          // stale-but-shown frame is never replaced by an error screen during refresh.
+          function runQueryPipeline(startMs: number, endMs: number, gran: Granularity, background: boolean = false) {
+            if (!db) return
+            const usageResult = queryUsage(db, startMs, endMs)
+            if ("error" in usageResult) {
+              if (!background) {
+                setErrorMsg(usageResult.error)
+                setViewState("error")
+                if (!hasLoadedOnce()) setHasLoadedOnce(true)
+              }
+              return
+            }
+            const usageData = usageResult
+            modelCache.set(modelCacheKey(gran, startMs), usageData)
+            setViewState(usageData)
+            computeAndSetDiff(startMs, usageData.totalInput + usageData.totalOutput)
+            if (!hasLoadedOnce()) setHasLoadedOnce(true)
+
+            scheduleHierarchyBuild(startMs, endMs, gran)
+            schedulePrefetch(startMs, endMs)
+          }
+
+          function refreshInBackground(startMs: number, endMs: number, gran: Granularity) {
+            setTimeout(() => {
+              if (cleanedUp || !db) return
+              runQueryPipeline(startMs, endMs, gran, true)
+            }, 0)
+          }
+
+          function loadData(forceRefresh: boolean = false) {
+            const { startMs, endMs } = computeWindow()
+            const gran = granularity()
+            const cacheKey = modelCacheKey(gran, startMs)
+
+            if (!forceRefresh) {
+              const cachedModelData = modelCache.get(cacheKey)
+              if (cachedModelData) {
+                setViewState(cachedModelData)
+                const currentTotal = cachedModelData.totalInput + cachedModelData.totalOutput
+                computeAndSetDiff(startMs, currentTotal)
+                if (!hasLoadedOnce()) setHasLoadedOnce(true)
+                return
+              }
+            }
+
+            if (!forceRefresh && gran === "month") {
+              const fileCached = getMonthCache(startMs)
+              if (fileCached) {
+                const models = fileCached.models ?? []
+                const isCurrent = isCurrentMonth(startMs)
+                const isStale = isCurrent && (Date.now() - fileCached.lastUpdated) >= CACHE_TTL_MS
+                const data: UsageData = {
+                  models,
+                  totalInput: fileCached.inputTokens,
+                  totalOutput: fileCached.outputTokens,
+                  totalCost: fileCached.totalCost,
+                }
+                setViewState(data)
+                modelCache.set(cacheKey, data)
+
+                const currentTotal = fileCached.inputTokens + fileCached.outputTokens
+                computeAndSetDiff(startMs, currentTotal)
+
+                if (!hasLoadedOnce()) setHasLoadedOnce(true)
+                if (isStale) refreshInBackground(startMs, endMs, gran)
+                return
+              }
+            } else if (!forceRefresh && (gran === "week" || gran === "day")) {
+              const monthStart = Date.UTC(new Date(startMs).getUTCFullYear(), new Date(startMs).getUTCMonth(), 1)
+              const monthCached = getMonthCache(monthStart)
+              const periodList = gran === "week" ? monthCached?.weeks : monthCached?.days
+              const period = periodList?.find(p => p.startMs === startMs)
+              if (period) {
+                const models = period.models ?? []
+                const isCurrent = gran === "week" ? weekOffset() === 0 : dayOffset() === 0
+                const isStale = isCurrent && (Date.now() - period.lastUpdated) >= CACHE_TTL_MS
+                const data: UsageData = {
+                  models,
+                  totalInput: period.inputTokens,
+                  totalOutput: period.outputTokens,
+                  totalCost: period.totalCost,
+                }
+                setViewState(data)
+                modelCache.set(cacheKey, data)
+
+                const currentTotal = period.inputTokens + period.outputTokens
+                computeAndSetDiff(startMs, currentTotal)
+
+                // Prefill adjacent model cache from hierarchy (sync, no DB)
+                const periodMs = gran === "week" ? 7 * MS_PER_DAY : MS_PER_DAY
+                const nextStart = startMs + periodMs
+                const nextKey = modelCacheKey(gran, nextStart)
+                if (!modelCache.has(nextKey)) {
+                  let adjPeriod: CachePeriod | undefined
+                  adjPeriod = periodList?.find(p => p.startMs === nextStart)
+                  if (!adjPeriod) {
+                    const adjMonthStart = Date.UTC(new Date(nextStart).getUTCFullYear(), new Date(nextStart).getUTCMonth(), 1)
+                    const adjCached = getMonthCache(adjMonthStart)
+                    const adjList2 = gran === "week" ? adjCached?.weeks : adjCached?.days
+                    adjPeriod = adjList2?.find(p => p.startMs === nextStart)
+                  }
+                  if (adjPeriod) {
+                    modelCache.set(nextKey, {
+                      models: adjPeriod.models,
+                      totalInput: adjPeriod.inputTokens,
+                      totalOutput: adjPeriod.outputTokens,
+                      totalCost: adjPeriod.totalCost,
+                    })
+                  }
+                }
+
+                if (!hasLoadedOnce()) setHasLoadedOnce(true)
+                if (isStale) refreshInBackground(startMs, endMs, gran)
+                return
+              }
+            }
+
+            // ── Fallback: cache miss (synchronous for first paint, shows spinner) ──
+            runQueryPipeline(startMs, endMs, gran)
+          }
+
           let cleanupKeyLayer: (() => void) | null = null
 
           function handleKey(key: string) {
             if (key === "left" || key === "h") {
               if (granularity() === "month") {
-                if (monthOffset() <= minMonthOffset) return true
+                if (monthOffset() <= minMonthOffset()) return true
                 setMonthOffset(p => p - 1)
               } else if (granularity() === "week") {
-                if (weekOffset() <= minWeekOffset) return true
+                if (weekOffset() <= minWeekOffset()) return true
                 setWeekOffset(p => p - 1)
               } else {
-                if (dayOffset() <= minDayOffset) return true
+                if (dayOffset() <= minDayOffset()) return true
                 setDayOffset(p => p - 1)
               }
               scroll.scrollToTop()
@@ -359,7 +352,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   const targetMonday = getWeekMonday(new Date(monthStart + 7 * MS_PER_DAY)).getTime()
                   const currentMonday = getWeekMonday(new Date()).getTime()
                   const diffWeeks = Math.round((targetMonday - currentMonday) / (7 * MS_PER_DAY))
-                  setWeekOffset(diffWeeks > 0 ? Math.min(diffWeeks, 0) : Math.max(diffWeeks, minWeekOffset))
+                  setWeekOffset(diffWeeks > 0 ? Math.min(diffWeeks, 0) : Math.max(diffWeeks, minWeekOffset()))
                 }
               } else if (granularity() === "week") {
                 setGranularity("day")
@@ -369,7 +362,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   const currentDayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
                   const targetDayStart = Date.UTC(targetMonday.getUTCFullYear(), targetMonday.getUTCMonth(), targetMonday.getUTCDate())
                   const diffDays = Math.round((targetDayStart - currentDayStart) / MS_PER_DAY)
-                  setDayOffset(diffDays > 0 ? Math.min(diffDays, 0) : Math.max(diffDays, minDayOffset))
+                  setDayOffset(diffDays > 0 ? Math.min(diffDays, 0) : Math.max(diffDays, minDayOffset()))
                 }
               } else {
                 setGranularity("month")
@@ -380,7 +373,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   const currentYear = now.getUTCFullYear()
                   const currentMonth = now.getUTCMonth()
                   const newMonthOffset = (d.getUTCFullYear() * 12 + d.getUTCMonth()) - (currentYear * 12 + currentMonth)
-                  setMonthOffset(newMonthOffset > 0 ? Math.min(newMonthOffset, 0) : Math.max(newMonthOffset, minMonthOffset))
+                  setMonthOffset(newMonthOffset > 0 ? Math.min(newMonthOffset, 0) : Math.max(newMonthOffset, minMonthOffset()))
                 }
               }
               scroll.scrollToTop()
@@ -408,7 +401,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             const { label } = computeWindow()
             const gran = granularity()
             const offset = gran === "month" ? monthOffset() : gran === "week" ? weekOffset() : dayOffset()
-            const minOffset = gran === "month" ? minMonthOffset : gran === "week" ? minWeekOffset : minDayOffset
+            const minOffset = gran === "month" ? minMonthOffset() : gran === "week" ? minWeekOffset() : minDayOffset()
 
             let arrows: string
             if (minOffset === 0) {
@@ -451,6 +444,17 @@ export function registerUsageCommand(api: TuiPluginApi) {
                 ],
               })
               loadData()
+              setTimeout(() => {
+                if (cleanedUp || !db) return
+                const earliestMs = getEarliestUsageDate(db)
+                if (earliestMs != null) {
+                  const off = computeMinOffsets(earliestMs, new Date())
+                  setMinMonthOffset(off.minMonthOffset)
+                  setMinWeekOffset(off.minWeekOffset)
+                  setMinDayOffset(off.minDayOffset)
+                  setCachedEarliestTs(earliestMs)
+                }
+              }, 0)
             })
             onCleanup(() => {
               if (cleanupKeyLayer) {

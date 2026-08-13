@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import type { ModelUsage } from "./types"
+export { MS_PER_DAY } from "./helpers/dates"
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-export const MS_PER_DAY = 86_400_000
 export const CACHE_TTL_MS = 60_000
-export const CACHE_VERSION = 3
+export const CACHE_VERSION = 4
 export const PREFETCH_DELAY_MS = 100
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -26,6 +26,7 @@ export interface CachePeriod {
 
 export interface UsageCache {
   version: number
+  earliestTs: number | null
   months: Record<string, CachePeriod>
 }
 
@@ -34,7 +35,7 @@ export interface UsageCache {
 const CACHE_DIR = `${homedir()}/.config/opencode/plugins/model-usage`
 const CACHE_FILE = `${CACHE_DIR}/.usage-cache.json`
 
-let usageCache: UsageCache = { version: CACHE_VERSION, months: {} }
+let usageCache: UsageCache = { version: CACHE_VERSION, months: {}, earliestTs: null }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 const SAVE_DEBOUNCE_MS = 2000
@@ -52,7 +53,10 @@ function loadDiskCache() {
       const raw = readFileSync(CACHE_FILE, "utf-8")
       const data = JSON.parse(raw)
       if (data.version === CACHE_VERSION && data.months) {
-        usageCache = data as UsageCache
+        usageCache = { ...data, earliestTs: typeof data.earliestTs === "number" ? data.earliestTs : null } as UsageCache
+      } else if (data.version === 3 && data.months) {
+        usageCache = migrateV3Cache(data)
+        saveDiskCache() // persist migration immediately
       } else if (data.version === 2 && data.months) {
         usageCache = migrateV2Cache(data)
         saveDiskCache() // persist migration immediately
@@ -109,7 +113,13 @@ export function migrateV2Cache(data: any): UsageCache {
       }
     }
   }
-  return { version: CACHE_VERSION, months }
+  return { version: CACHE_VERSION, months, earliestTs: null }
+}
+
+export function migrateV3Cache(data: any): UsageCache {
+  const cloned = JSON.parse(JSON.stringify(data))
+  const months = cloned.months || {}
+  return { version: CACHE_VERSION, months, earliestTs: null }
 }
 
 export function getMonthCache(startMs: number): CachePeriod | undefined {
@@ -182,6 +192,16 @@ export function flushDiskSave() {
     saveTimer = null
     saveDiskCache()
   }
+}
+
+export function getCachedEarliestTs(): number | null {
+  return usageCache.earliestTs ?? null
+}
+
+export function setCachedEarliestTs(ts: number | null) {
+  if (usageCache.earliestTs === ts) return
+  usageCache.earliestTs = ts
+  scheduleDiskSave()
 }
 
 // ─── Module init ─────────────────────────────────────────────────────────────
