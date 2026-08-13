@@ -93,7 +93,7 @@ function saveToolDefs(data: Record<string, ToolDefSnapshot>): Promise<void> {
 function isTitleGenerator(system: string[]): boolean {
   // Title-generation calls fire the same hook with a tiny "You are a title
   // generator" system. They are NOT the real session system prompt and would
-  // pollute the entry if stored. Mirror jungle-mode-server.ts:38.
+  // pollute the entry if stored. Mirror persona-injector-server.ts.
   return system.join("\n").toLowerCase().includes("title generator")
 }
 
@@ -166,8 +166,8 @@ export const ModelUsageServerPlugin = async () => {
         }
 
         // No material change since last persist → just refresh timestamp
-        // occasionally (throttle I/O) and bail. Now that jungle-mode injects
-        // on every call, the latest measurement IS the most accurate.
+        // occasionally (throttle I/O) and bail. Now that persona-injector
+        // injects on every call, the latest measurement IS the most accurate.
         if (Math.abs(tokens - prev.t) <= DRIFT_THRESHOLD) {
           // Backfill rawText for entries captured before it was stored.
           if (!prev.fragments || prev.fragments.length === 0) {

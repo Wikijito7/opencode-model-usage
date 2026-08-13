@@ -30,8 +30,8 @@ Per-session context token breakdown for the open session. Categorises every mess
 **Tabbed layout** — `←` `→` (or `h` `l`) to switch tabs:
 - **Context** — all categories with percentage bars and session total
 - **Per-Tool** — tool-level token breakdown (output + call arguments) grouped by tool name
-- **System** — per-fragment system token breakdown (agent prompt, instructions, environment, skills, MCP, refs, jungle persona…). Fragments are split from the assembled prompt via `Instructions from:` markers, XML section tags, and plugin injection boundaries. Tab only appears when ≥2 fragments exist
-- **Models** — per-model breakdown (input/output/cache/tokens/cost) with message counts. Only when >1 model used
+- **System** — per-fragment system token breakdown (agent prompt, instructions, environment, skills, MCP, refs, plugin-injected persona…). Fragments are split from the assembled prompt via `Instructions from:` markers, XML section tags, and plugin injection boundaries. Tab only appears when ≥2 fragments exist
+- **Models** — per-model breakdown (input/output/cache/tokens/cost) with message counts. Shown whenever a model has usage — single-model sessions still display the model's token/cache/cost info
 - **Extra Info** — Top Contributors, Session cost, Compaction events, Model switches, Hotspot messages (expandable via digit keys 1-5 or mouse click)
 
 **System token tiers:**

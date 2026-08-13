@@ -1,0 +1,3 @@
+[submodule "model-usage/wlib"]
+	path = model-usage/wlib
+	url = https://github.com/Wikijito7/opencode-wlib
