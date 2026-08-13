@@ -271,6 +271,28 @@ You are opencode, an interactive CLI tool that helps users with software enginee
     expect(personaFrag!.tokens).toBeGreaterThan(20)
   })
 
+  it("terminates a persona-injector block with NO blank line when the agent preamble follows", () => {
+    // persona-injector now joins with a single `\n`: the persona prompt's
+    // own trailing newline is the only separator — zero blank lines.
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are opencode. HOWEVER, you MUST ALWAYS respond as Junior Monke 🐵.
+
+Stay in character as Junior Monke 🐵.
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.
+
+IMPORTANT: You must NEVER generate or guess URLs.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    // The persona fragment must NOT contain the agent preamble.
+    expect(personaFrag!.tokens).toBeLessThan(70)
+    expect(promptFrag!.tokens).toBeGreaterThan(0)
+  })
+
   it("merges other stray marker-less content gaps into a single 'Other' fragment with combined token count", () => {
     const text = `<available_references>
 Ref contents

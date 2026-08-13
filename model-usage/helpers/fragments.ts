@@ -81,6 +81,14 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
         push()
         pluginMode = false
         afterPluginMode = true
+      } else if (AGENT_PREAMBLE.test(line)) {
+        // The injected persona ended WITHOUT a blank-line separator (single
+        // `\n` join on persona-injector's side) — the agent preamble line
+        // IS the start of the base system prompt. End the section and let
+        // the line start the "Agent System Prompt" fragment below.
+        push()
+        pluginMode = false
+        afterPluginMode = true
       } else if (line.trim().length === 0) {
         current!.text += line + "\n"
         pluginBlankCount++
