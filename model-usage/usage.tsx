@@ -4,13 +4,14 @@ import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { Database } from "bun:sqlite"
 
-import { onMount, onCleanup, createSignal } from "solid-js"
+import { onMount, onCleanup, createSignal, createEffect } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo } from "./helpers/dates"
 import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
 import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
 import { makeScrollState } from "./shared/scroll"
 import { registerDialogKeyLayer } from "./shared/keys"
+import { useDialogSizing } from "./wlib/dialog"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache } from "./cache"
 import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal } from "./usage-domain"
@@ -400,6 +401,12 @@ export function registerUsageCommand(api: TuiPluginApi) {
           }
 
           api.ui.dialog.replace(() => {
+            // Desired large/40 — falls back to fit the terminal (never cut off).
+            const dialogSizing = useDialogSizing({ size: "large", maxHeight: 40 })
+            createEffect(() => {
+              api.ui.dialog.setSize(dialogSizing().size)
+            })
+
             const { label } = computeWindow()
             const gran = granularity()
             const offset = gran === "month" ? monthOffset() : gran === "week" ? weekOffset() : dayOffset()
@@ -417,7 +424,6 @@ export function registerUsageCommand(api: TuiPluginApi) {
             }
 
             onMount(() => {
-              api.ui.dialog.setSize("large")
               cleanupKeyLayer = registerDialogKeyLayer(api, {
                 bindings: [
                   { key: "left",  cmd: "usage.navLeft",  desc: "Previous" },
@@ -471,7 +477,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                     <text fg={muted}>{hasOverflow && scroll.isScrolled() ? "\u25b2 more above" : " "}</text>
                   )
                 })()}
-                <scrollbox ref={(el) => scroll.scrollRef = el} flexDirection="column" gap={1} maxHeight={40} scrollbarOptions={{ visible: false }}>
+                <scrollbox ref={(el) => scroll.scrollRef = el} flexDirection="column" gap={1} maxHeight={dialogSizing().maxHeight} scrollbarOptions={{ visible: false }}>
                   {viewState() === "loading" ? (
                     <text fg={muted}>Loading usage data{"\u2026"}</text>
                   ) : viewState() === "error" ? (

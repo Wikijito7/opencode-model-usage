@@ -518,4 +518,66 @@ describe("analyzeSessionMessages", () => {
 
     expect(result.rawSystemText).toBe(serverSnapshot.rawText)
   })
+
+  // ─── 8. Final system override (persona-injector sidecar) ─────────────────
+
+  it("prefers the final system override over the server snapshot (visor + fragments)", () => {
+    const serverSnapshot: SystemSnapshot = {
+      t: 5600,
+      ts: Date.now(),
+      fragments: [{ label: "Agent", tokens: 5600 }],
+      rawText: "You are opencode, an interactive CLI tool that helps users with software engineering tasks.",
+    }
+
+    // What persona-injector actually sent: marker + persona + base prompt.
+    const override = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are Warrior Monke!
+
+
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.
+
+Instructions from: /some/path/AGENTS.md
+Follow the guide.`
+
+    const result = analyzeSessionMessages(
+      [makeUserMessage("Hello!"), makeAssistantMessage({ input: 100 }, "Hi!")],
+      "test-override",
+      serverSnapshot,
+      null,
+      override,
+    )
+
+    // Visor shows the final system (persona included)
+    expect(result.rawSystemText).toBe(override)
+
+    // Breakdown rows come from the override text: persona fragment +
+    // agent prompt fragment + AGENTS.md fragment
+    const sysCat = result.categories.find((c) => c.name.startsWith("SYSTEM"))
+    expect(sysCat).toBeDefined()
+    const labels = sysCat!.entries.map((e) => e.label)
+    expect(labels).toContain("persona-injector")
+    expect(labels).toContain("Agent System Prompt")
+    expect(labels).toContain("/some/path/AGENTS.md")
+    expect(sysCat!.entries.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it("falls back to the server snapshot when no override is present", () => {
+    const serverSnapshot: SystemSnapshot = {
+      t: 500,
+      ts: Date.now(),
+      fragments: [{ label: "Agent", tokens: 500 }],
+      rawText: "base system text",
+    }
+
+    const result = analyzeSessionMessages(
+      [makeUserMessage("Hello!"), makeAssistantMessage({ input: 100 }, "Hi!")],
+      "test-no-override",
+      serverSnapshot,
+      null,
+      null,
+    )
+
+    expect(result.rawSystemText).toBe("base system text")
+  })
 })

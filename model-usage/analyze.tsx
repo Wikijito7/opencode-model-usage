@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/solid */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
-import { onMount, onCleanup, createSignal, createMemo } from "solid-js"
+import { onMount, onCleanup, createSignal, createMemo, createEffect } from "solid-js"
 import { log } from "./helpers/debug"
 import { buildBar, fmt, truncateLabel, fmtCompact, fmtCost } from "./helpers/format"
 import { writeClipboard } from "./helpers/clipboard"
@@ -12,7 +12,8 @@ import { makeScrollState } from "./shared/scroll"
 import { registerDialogKeyLayer } from "./shared/keys"
 import { createLoadGuard } from "./shared/reload"
 import type { SessionMessagesResponse } from "@opencode-ai/sdk/v2"
-import { loadSystemSnapshot, loadBaselineTokens, analyzeSessionMessages, type AnalysisData, type CategoryEntry, type Category, type FormattedHotspotResult } from "./analyze-domain"
+import { loadSystemSnapshot, loadBaselineTokens, loadFinalSystemOverride, analyzeSessionMessages, type AnalysisData, type CategoryEntry, type Category, type FormattedHotspotResult } from "./analyze-domain"
+import { useDialogSizing } from "./wlib/dialog"
 
 interface ThemeColors {
   foreground?: string
@@ -108,7 +109,10 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             // Show Tool Defs tab when the TOOL DEFS category has 2+ entries (per-tool breakdown)
             const tdCat = categories().find((c: Category) => c.name === "TOOL DEFS")
             if (tdCat && tdCat.entries.length >= 2) t.push({ id: "tooldefs", label: "Tool Defs" })
-            if (modelStats().length > 1) t.push({ id: "models", label: "Models" })
+            // Models tab always shows when at least one model has usage —
+            // single-model sessions still show important info (↑ input,
+            // ↓ output, cache hit rate, cost, token share).
+            if (modelStats().length > 0) t.push({ id: "models", label: "Models" })
             t.push({ id: "extra", label: "Extra Info" })
             return t
           })
@@ -163,8 +167,9 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
 
               const serverSnapshot = loadSystemSnapshot(currentSessionID)
               const baselineTokens = loadBaselineTokens(currentSessionID)
+              const finalSystemOverride = loadFinalSystemOverride(currentSessionID)
 
-              const data = analyzeSessionMessages(messages, currentSessionID, serverSnapshot, baselineTokens)
+              const data = analyzeSessionMessages(messages, currentSessionID, serverSnapshot, baselineTokens, finalSystemOverride)
 
               setRawSystemText(data.rawSystemText)
               setRawToolDefsText(data.rawToolDefsText)
@@ -215,6 +220,12 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
 
           // ── Reactive dialog ──────────────────────────────────────────────
           api.ui.dialog.replace(() => {
+            // Desired large/40 — falls back to fit the terminal (never cut off).
+            const dialogSizing = useDialogSizing({ size: "large", maxHeight: 40 })
+            createEffect(() => {
+              api.ui.dialog.setSize(dialogSizing().size)
+            })
+
             const toggleExpand = (idx: number) => {
               const list = tabs()
               const currentTab = list[Math.min(activeTab(), list.length - 1)]
@@ -251,8 +262,6 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             }
 
             onMount(() => {
-              api.ui.dialog.setSize("large")
-
               // Register dialog key layer for scroll + tabs + reload
               cleanupKeyLayer = registerDialogKeyLayer(api, {
                 bindings: [
@@ -366,7 +375,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
                   ref={(el) => scroll.scrollRef = el}
                   flexDirection="column"
                   gap={1}
-                  maxHeight={40}
+                  maxHeight={dialogSizing().maxHeight}
                   scrollbarOptions={{ visible: false }}
                 >
                   {loading() && categories().length === 0 ? (

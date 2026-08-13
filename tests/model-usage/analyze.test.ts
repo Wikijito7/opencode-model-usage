@@ -183,6 +183,116 @@ Unmarked text that continues after the jungle mode.`
     expect(promptFrag!.tokens).toBeGreaterThan(0)
   })
 
+  it("terminates persona-injector blocks at 2 consecutive blank lines and does not swallow the agent prompt", () => {
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are opencode. HOWEVER, you MUST ALWAYS respond as Junior Monke 🐵.
+
+
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.
+
+Instructions from: /some/path/AGENTS.md
+Follow this guide to get the job done right.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(3)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    // The agent prompt must NOT be swallowed into the persona fragment.
+    expect(personaFrag!.tokens).toBeLessThan(45)
+    expect(promptFrag!.tokens).toBeGreaterThan(0)
+  })
+
+  it("does not swallow content following a persona-injector block into the persona fragment", () => {
+    const text = `Instructions from: persona-injector
+🍌 JUNGLE MODE ACTIVE 🍌
+You are Warrior Monke!
+
+
+Unmarked text that continues after the persona injection.`
+    const frags = splitSystemFragments(text)
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(promptFrag).toBeDefined()
+    expect(promptFrag!.tokens).toBeGreaterThan(0)
+  })
+
+  it("terminates a persona-injector block at a single blank line followed by the agent preamble", () => {
+    // Persona prompt without trailing newline → only one blank line
+    // separates it from the base system prompt.
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are Warrior Monke!
+
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.
+
+Instructions from: /some/path/AGENTS.md
+Follow the guide.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(3)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    expect(personaFrag!.tokens).toBeLessThan(45)
+    expect(promptFrag!.tokens).toBeGreaterThan(0)
+  })
+
+  it("terminates a persona-injector block at a single blank line followed by another section marker", () => {
+    const text = `Instructions from: persona-injector
+My custom persona
+
+Instructions from: /some/path/AGENTS.md
+Follow the guide.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    expect(frags.some((f) => f.label === "persona-injector")).toBe(true)
+    expect(frags.some((f) => f.label === "/some/path/AGENTS.md")).toBe(true)
+  })
+
+  it("does not terminate a persona-injector block on internal blank lines", () => {
+    // The persona content itself contains single blank lines (e.g. between
+    // the `## JUNGLE MODE` header and the body) — they must NOT split it.
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+
+You are Warrior Monke!
+We keep going.
+
+
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.`
+    const frags = splitSystemFragments(text)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    // Internal blank lines stay inside the persona fragment (it ends at the
+    // double blank line right before the agent preamble).
+    expect(personaFrag!.tokens).toBeGreaterThan(20)
+  })
+
+  it("terminates a persona-injector block with NO blank line when the agent preamble follows", () => {
+    // persona-injector now joins with a single `\n`: the persona prompt's
+    // own trailing newline is the only separator — zero blank lines.
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are opencode. HOWEVER, you MUST ALWAYS respond as Junior Monke 🐵.
+
+Stay in character as Junior Monke 🐵.
+You are opencode, an interactive CLI tool that helps users with software engineering tasks.
+
+IMPORTANT: You must NEVER generate or guess URLs.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    // The persona fragment must NOT contain the agent preamble.
+    expect(personaFrag!.tokens).toBeLessThan(70)
+    expect(promptFrag!.tokens).toBeGreaterThan(0)
+  })
+
   it("merges other stray marker-less content gaps into a single 'Other' fragment with combined token count", () => {
     const text = `<available_references>
 Ref contents

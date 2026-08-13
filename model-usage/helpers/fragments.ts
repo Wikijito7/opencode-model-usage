@@ -3,10 +3,26 @@ import { estimateTokens } from "./tokens"
 
 /**
  * Split an assembled system prompt into labelled fragments by
- * jungle-mode `Instructions from:` markers, and XML-like section blocks
- * (`<available_references>`, `<mcp_instructions>`, `<available_skills>`).
- * Each fragment's tokens are estimated with char/4. Pure / testable.
+ * plugin-injected `Instructions from:` markers (e.g. persona-injector,
+ * legacy jungle-mode), file-reference markers, and XML-like section
+ * blocks (`<available_references>`, `<mcp_instructions>`,
+ * `<available_skills>`). Each fragment's tokens are estimated with
+ * char/4. Pure / testable.
  */
+
+// Markers that indicate a plugin-injected section (prepended by server
+// plugins via `experimental.chat.system.transform`). These sections are
+// collected until the boundary before the original system prompt.
+// File-reference markers (AGENTS.md paths) are NOT plugin injections —
+// they are regular section headers.
+const PLUGIN_INJECTION_MARKER = /^(jungle-mode\/|persona-injector)/
+
+// Standard opencode agent preambles that start the base system prompt
+// following a plugin-injected section. Fallback boundary signal when the
+// injected persona prompt does not end with a trailing newline (single
+// blank line separator instead of the usual two).
+const AGENT_PREAMBLE = /^(You are opencode, an interactive CLI tool|You are the \*\*Lead Coordinator Agent\*\*)/
+
 export function splitSystemFragments(systemText: string, maxFragments = 100): SystemFragment[] {
   if (!systemText || systemText.trim().length === 0) return []
   const lines = systemText.split("\n")
@@ -18,7 +34,7 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
   let pluginBlankCount = 0
 
   let hasCreatedAnyBucket = false
-  let afterJungleMode = false
+  let afterPluginMode = false
 
   // Top-level XML sections in the assembled system prompt (system.ts,
   // skill.ts). Only these three tags start a new fragment; inner tags
@@ -30,6 +46,10 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
     available_skills: "Skills",
   }
 
+  // Section-starting lines that can never be persona content — hitting one
+  // means the plugin section has ended.
+  const isSectionStarter = (l: string) => /^Instructions from:\s*(.+)$/.test(l) || sectionOpen.test(l)
+
   const push = () => {
     if (current && current.text.trim().length > 0) {
       buckets.push(current)
@@ -37,7 +57,9 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
     current = null
   }
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
     // Inside a multi-line XML block: collect until the closing tag.
     if (xmlMode) {
       current!.text += line + "\n"
@@ -48,24 +70,45 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
       continue
     }
 
-    // Inside a plugin-injected section (e.g. jungle-mode persona):
-    // collect everything until two consecutive blank lines — the
-    // boundary between the plugin section and the original system prompt.
-    // Headers within this section (like `## 🍌 JUNGLE MODE ACTIVE 🍌`)
+    // Inside a plugin-injected section (e.g. persona-injector persona):
+    // collect everything until the boundary with the original system
+    // prompt. Headers within this section (like `## 🍌 JUNGLE MODE ACTIVE 🍌`)
     // are content, not separate fragments.
     if (pluginMode) {
-      current!.text += line + "\n"
-      if (line.trim().length === 0) {
+      // A new section marker always ends the plugin section — process the
+      // line as its own fragment below.
+      if (isSectionStarter(line)) {
+        push()
+        pluginMode = false
+        afterPluginMode = true
+      } else if (AGENT_PREAMBLE.test(line)) {
+        // The injected persona ended WITHOUT a blank-line separator (single
+        // `\n` join on persona-injector's side) — the agent preamble line
+        // IS the start of the base system prompt. End the section and let
+        // the line start the "Agent System Prompt" fragment below.
+        push()
+        pluginMode = false
+        afterPluginMode = true
+      } else if (line.trim().length === 0) {
+        current!.text += line + "\n"
         pluginBlankCount++
-        if (pluginBlankCount >= 2) {
+        // Boundary: two consecutive blank lines (persona prompt ends with
+        // a trailing newline), or a single blank line followed by the next
+        // section (persona prompt without trailing newline).
+        const next = lines[i + 1]
+        const atBoundary =
+          pluginBlankCount >= 2 ||
+          (next !== undefined && (AGENT_PREAMBLE.test(next) || isSectionStarter(next)))
+        if (atBoundary) {
           push()
           pluginMode = false
-          afterJungleMode = true
+          afterPluginMode = true
         }
       } else {
+        current!.text += line + "\n"
         pluginBlankCount = 0
       }
-      continue
+      if (pluginMode) continue
     }
 
     // XML block start (section-level only).
@@ -75,7 +118,7 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
       push()
       current = { label: friendlyLabel[tag] ?? tag.replace(/_/g, " "), text: line + "\n" }
       hasCreatedAnyBucket = true
-      afterJungleMode = false
+      afterPluginMode = false
       xmlCloseTag = `</${tag}>`
       if (line.includes(xmlCloseTag)) {
         push()
@@ -92,12 +135,12 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
       const label = rawLabel.length > 48 ? rawLabel.slice(0, 47) + "…" : rawLabel
       current = { label, text: line + "\n" }
       hasCreatedAnyBucket = true
-      afterJungleMode = false
-      // Only enter plugin mode for jungle-mode injections (collect until
-      // double blank line). Other Instructions from: lines (e.g. AGENTS.md
-      // file references) are regular section headers — don't swallow their
-      // content into plugin mode.
-      if (/^jungle-mode\//.test(jungle[1].trim())) {
+      afterPluginMode = false
+      // Only enter plugin mode for plugin-injected markers (collect until
+      // the section boundary). Other Instructions from: lines (e.g.
+      // AGENTS.md file references) are regular section headers — don't
+      // swallow their content into plugin mode.
+      if (PLUGIN_INJECTION_MARKER.test(jungle[1].trim())) {
         pluginMode = true
         pluginBlankCount = 0
       }
@@ -109,9 +152,9 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
       if (!hasCreatedAnyBucket) {
         label = "Agent System Prompt"
         hasCreatedAnyBucket = true
-      } else if (afterJungleMode) {
+      } else if (afterPluginMode) {
         label = "Agent System Prompt"
-        afterJungleMode = false
+        afterPluginMode = false
       } else {
         label = "other_markerless"
       }
