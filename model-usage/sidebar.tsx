@@ -8,7 +8,7 @@ import { isSupportedModel } from "./helpers/model"
 import { buildProgressBar, getUsageColor, getQuotaLabel, formatDuration } from "./helpers/format"
 import { splitCost } from "./helpers/cost"
 import { appendFileSync } from "node:fs"
-import { createLoadGuard } from "./shared/reload"
+import { createLoadGuard } from "./wlib/reload"
 import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
 import { resolveThemeColors } from "./wlib/theme"
 

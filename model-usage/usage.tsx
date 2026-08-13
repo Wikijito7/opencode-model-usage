@@ -9,8 +9,8 @@ import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo } from "./help
 import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
 import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
-import { makeScrollState } from "./shared/scroll"
-import { registerDialogKeyLayer } from "./shared/keys"
+import { makeScrollState } from "./wlib/scroll"
+import { registerDialogKeyLayer } from "./wlib/keys"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
