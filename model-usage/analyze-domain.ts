@@ -12,6 +12,7 @@ import { aggregateModelStats } from "./helpers/models"
 import type { ModelUsageRecord, ModelStat } from "./helpers/models"
 import { splitSystemFragments } from "./helpers/fragments"
 import { loadBaseline } from "./db"
+import { readSystemSnapshot } from "./wlib/system"
 import type { SystemFragment, SystemSnapshot, SystemSource, ToolDefSnapshot } from "./types"
 import type { Message, Part } from "@opencode-ai/sdk/v2"
 
@@ -79,6 +80,26 @@ export function loadSystemSnapshot(sessionID: string): SystemSnapshot | null {
   return null
 }
 
+// ── Final system override (persona-injector sidecar) ─────────────────────────
+// The server plugin snapshots the system BEFORE other plugins mutate it
+// (hook registration order: model-usage < persona-injector). The injector
+// persists the FINAL system it produced to the opencode-wlib sidecar; when
+// present for this session, its text is the most accurate representation of
+// what was actually sent and wins over the server snapshot.
+export function loadFinalSystemOverride(sessionID: string): string | null {
+  try {
+    const entry = readSystemSnapshot(sessionID)
+    if (entry) {
+      log("loadFinalSystemOverride: FOUND override for", sessionID, "len =", entry.rawText.length)
+      return entry.rawText
+    }
+    log("loadFinalSystemOverride: no override for", sessionID)
+  } catch (err) {
+    log("loadFinalSystemOverride: error:", String(err))
+  }
+  return null
+}
+
 // ── Tool definitions snapshot from server plugin ────────────────────────────
 // Reads the LATEST tool definitions persisted by model-usage-server.ts
 // via the "tool.definition" hook to tool-defs.json.
@@ -126,6 +147,7 @@ export function analyzeSessionMessages(
   currentSessionID: string,
   serverSnapshot: SystemSnapshot | null,
   baselineTokens: number | null,
+  finalSystemOverride: string | null = null,
 ): AnalysisData {
   log("=== analyze: loaded", messages.length, "messages for session", currentSessionID, "===")
 
@@ -141,7 +163,7 @@ export function analyzeSessionMessages(
       compactionSummary: null,
       sessionCost: 0,
       hotspotResults: [],
-      rawSystemText: serverSnapshot?.rawText ?? "",
+      rawSystemText: finalSystemOverride ?? serverSnapshot?.rawText ?? "",
       rawToolDefsText: "",
       toolDefsTokens: 0,
       syntheticTokens: 0,
@@ -187,7 +209,7 @@ export function analyzeSessionMessages(
   // Per-message telemetry sum for reasoning tokens (provider-reported,
   // exact). Used to scale the REASONING category's char/4 entries.
   let reasoningTelemetry = 0
-  const rawSystemText = serverSnapshot?.rawText ?? ""
+  const rawSystemText = finalSystemOverride ?? serverSnapshot?.rawText ?? ""
   const toolDefsSnapshot = loadToolDefsSnapshot(currentSessionID)
   log("analyze: toolDefsSnapshot =", toolDefsSnapshot ? `t=${toolDefsSnapshot.t} frags=${toolDefsSnapshot.fragments.length}` : "null")
   const rawToolDefsText = toolDefsSnapshot?.rawText ?? ""
@@ -465,11 +487,15 @@ export function analyzeSessionMessages(
   // most accurate source. Tier 2 telemetry provides the raw prompt size
   // which we use as a validation check and to compute tool defs residual.
   const serverTotal = serverSnapshot?.t ?? null
-  // Re-split from rawText with the current splitSystemFragments logic.
-  // This makes fragment display immune to stale server-cached fragments
-  // (the server plugin may not re-capture on every restart if the system prompt
-  // hasn't changed materially, leaving old pre-PR#39 fragments in system-tokens.json).
-  const rawSysText = serverSnapshot?.rawText
+  // Re-split from the most accurate text with the current
+  // splitSystemFragments logic. The persona-injector sidecar override
+  // (final system as sent, persona included) wins over the server
+  // snapshot (captured pre-injection due to hook ordering). This makes
+  // fragment display immune to stale server-cached fragments (the server
+  // plugin may not re-capture on every restart if the system prompt
+  // hasn't changed materially, leaving old pre-PR#39 fragments in
+  // system-tokens.json).
+  const rawSysText = finalSystemOverride ?? serverSnapshot?.rawText
   const serverFrags: SystemFragment[] = rawSysText
     ? splitSystemFragments(rawSysText)
     : (serverSnapshot?.fragments ?? [])
