@@ -209,8 +209,28 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           api.ui.dialog.replace(() => {
             // Desired large/40 — falls back to fit the terminal (never cut off).
             const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
+            log(
+              "[mu:analyze] dialog open",
+              `renderer=${api.renderer ? "present" : "missing"}`,
+              `geometry w=${api.renderer?.width} h=${api.renderer?.height}`,
+              `terminal w=${api.renderer?.terminalWidth} h=${api.renderer?.terminalHeight}`,
+              `stdout w=${process.stdout.columns} h=${process.stdout.rows}`,
+            )
             createEffect(() => {
-              api.ui.dialog.setSize(dialogSizing().size)
+              const fit = dialogSizing()
+              api.ui.dialog.setSize(fit.size)
+              log("[mu:analyze] sizing", fit.size, fit.maxHeight)
+              const el = scroll.scrollRef
+              if (el) {
+                setTimeout(() => {
+                  log(
+                    "[mu:analyze] el-state",
+                    `height=${(el as any).height}`,
+                    `viewport=${(el as any).viewport?.height}`,
+                    `content=${(el as any).content?.height}`,
+                  )
+                }, 250)
+              }
             })
 
             const toggleExpand = (idx: number) => {
@@ -360,8 +380,6 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
 
                 <scrollbox
                   ref={(el) => scroll.scrollRef = el}
-                  flexDirection="column"
-                  gap={1}
                   maxHeight={dialogSizing().maxHeight}
                   scrollbarOptions={{ visible: false }}
                 >

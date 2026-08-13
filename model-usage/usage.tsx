@@ -6,6 +6,7 @@ import { Database } from "bun:sqlite"
 
 import { onMount, onCleanup, createSignal, createEffect } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets } from "./helpers/dates"
+import { log } from "./helpers/debug"
 import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
 import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
@@ -394,8 +395,28 @@ export function registerUsageCommand(api: TuiPluginApi) {
           api.ui.dialog.replace(() => {
             // Desired large/40 — falls back to fit the terminal (never cut off).
             const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
+            log(
+              "[mu:usage] dialog open",
+              `renderer=${api.renderer ? "present" : "missing"}`,
+              `geometry w=${api.renderer?.width} h=${api.renderer?.height}`,
+              `terminal w=${api.renderer?.terminalWidth} h=${api.renderer?.terminalHeight}`,
+              `stdout w=${process.stdout.columns} h=${process.stdout.rows}`,
+            )
             createEffect(() => {
-              api.ui.dialog.setSize(dialogSizing().size)
+              const fit = dialogSizing()
+              api.ui.dialog.setSize(fit.size)
+              log("[mu:usage] sizing", fit.size, fit.maxHeight)
+              const el = scroll.scrollRef
+              if (el) {
+                setTimeout(() => {
+                  log(
+                    "[mu:usage] el-state",
+                    `height=${(el as any).height}`,
+                    `viewport=${(el as any).viewport?.height}`,
+                    `content=${(el as any).content?.height}`,
+                  )
+                }, 250)
+              }
             })
 
             const { label } = computeWindow()
@@ -479,7 +500,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                     <text fg={muted}>{hasOverflow && scroll.isScrolled() ? "\u25b2 more above" : " "}</text>
                   )
                 })()}
-                <scrollbox ref={(el) => scroll.scrollRef = el} flexDirection="column" gap={1} maxHeight={dialogSizing().maxHeight} scrollbarOptions={{ visible: false }}>
+                <scrollbox ref={(el) => scroll.scrollRef = el} maxHeight={dialogSizing().maxHeight} scrollbarOptions={{ visible: false }}>
                   {viewState() === "loading" ? (
                     <text fg={muted}>Loading usage data{"\u2026"}</text>
                   ) : viewState() === "error" ? (
