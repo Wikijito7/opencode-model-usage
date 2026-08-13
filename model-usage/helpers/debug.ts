@@ -1,16 +1,15 @@
-import { mkdirSync, appendFileSync } from "node:fs"
+/**
+ * Debug logging — thin adapter over opencode-wlib's `createLog`.
+ * Keeps model-usage's env var (`OPENCODE_COPILOT_DEBUG`) and log file
+ * naming so call sites and existing log files don't change.
+ */
+
+import { createLog } from "../wlib/log"
 
 export const DEBUG = process.env.OPENCODE_COPILOT_DEBUG === "true"
 export const logsDir = new URL("../logs", import.meta.url).pathname
-export const logPath = new URL(`../logs/log_copilot_plugin_${Date.now()}.log`, import.meta.url).pathname
-if (DEBUG) mkdirSync(logsDir, { recursive: true })
+const LOG_FILE_NAME = `log_copilot_plugin_${Date.now()}.log`
+export const logPath = `${logsDir}/${LOG_FILE_NAME}`
 
-export function log(...args: unknown[]) {
-  if (!DEBUG) return
-  try {
-    const line = `[${new Date().toISOString()}] ${args.map(String).join(" ")}\n`
-    appendFileSync(logPath, line)
-  } catch {
-    // ignore
-  }
-}
+const logger = createLog({ debug: DEBUG, dir: logsDir, fileName: LOG_FILE_NAME })
+export const log = logger.log

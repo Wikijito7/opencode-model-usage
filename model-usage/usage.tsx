@@ -9,9 +9,10 @@ import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo } from "./help
 import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
 import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
-import { makeScrollState } from "./shared/scroll"
-import { registerDialogKeyLayer } from "./shared/keys"
+import { makeScrollState } from "./wlib/scroll"
+import { registerDialogKeyLayer } from "./wlib/keys"
 import { useDialogSizing } from "./wlib/dialog"
+import { resolveThemeColors } from "./wlib/theme"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache } from "./cache"
 import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal } from "./usage-domain"
@@ -26,13 +27,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
         namespace: "palette",
         slashName: "usage",
         async run() {
-          const theme = api.theme.current
           const dbPath = `${homedir()}/.local/share/opencode/opencode.db`
           const now = new Date()
 
-          const fg = theme?.text ?? "#ffffff"
-          const muted = theme?.textMuted ?? "#888888"
-          const red = theme?.error ?? "#ef4444"
+          const { fg, muted, red } = resolveThemeColors(api.theme.current)
 
           if (!existsSync(dbPath)) {
             api.ui.dialog.replace(() => {
@@ -402,7 +400,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
 
           api.ui.dialog.replace(() => {
             // Desired large/40 — falls back to fit the terminal (never cut off).
-            const dialogSizing = useDialogSizing({ size: "large", maxHeight: 40 })
+            const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
             createEffect(() => {
               api.ui.dialog.setSize(dialogSizing().size)
             })
