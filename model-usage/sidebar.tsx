@@ -10,6 +10,7 @@ import { splitCost } from "./helpers/cost"
 import { appendFileSync } from "node:fs"
 import { createLoadGuard } from "./shared/reload"
 import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
+import { resolveThemeColors } from "./wlib/theme"
 
 const log = logFn
 
@@ -19,11 +20,6 @@ const MAX_POLL_ATTEMPTS = 30
 const PLUGIN_VERSION = "v41"
 
 log(`=== usage-sidebar ${PLUGIN_VERSION} loaded ===`)
-
-interface Theme {
-  foreground?: string
-  muted?: string
-}
 
 function getActiveModel(api: TuiPluginApi, sessionID: string): string | null {
   try {
@@ -518,14 +514,14 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
 
   log("UsageSidebar: render, isSupported:", isSupported(), "activeModel:", currentModel())
 
-  const theme = props.api.theme.current as Theme
+  const { fg, muted } = resolveThemeColors(props.api.theme.current)
 
   return (
     <box flexDirection="column" gap={0}>
       {isSupported() ? (
         <>
-          <text fg={theme?.text ?? "#ffffff"}><strong>{providerLabel()}</strong></text>
-          <text fg={theme?.textMuted ?? "#888888"}>Cost estimation</text>
+          <text fg={fg}><strong>{providerLabel()}</strong></text>
+          <text fg={muted}>Cost estimation</text>
           <text fg="#ffffff">{("↑ " + peakInputTokens().toLocaleString() + " tokens").padEnd(26) + "$" + totalInputCost().toFixed(2)}</text>
           <text fg="#ffffff">{("↓ " + totalOutputTokens().toLocaleString() + " tokens").padEnd(26) + "$" + totalOutputCost().toFixed(2)}</text>
           {cacheHitRate() !== null ? (
@@ -533,12 +529,12 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
               {cacheHitRate() + "% cache hit"}
             </text>
           ) : null}
-          <text fg={theme?.text ?? "#ffffff"}>
+          <text fg={fg}>
             {"Total".padEnd(26) + "$" + (totalInputCost() + totalOutputCost()).toFixed(2)}
           </text>
           {isCopilotActive() ? (
             <>
-              <text fg={theme?.textMuted ?? "#888888"}>Monthly quota</text>
+              <text fg={muted}>Monthly quota</text>
               {!hasToken ? (
                 <text fg="#eab308">No token provided (set GITHUB_TOKEN)</text>
               ) : quotaInfo()?.unlimited ? (
@@ -559,7 +555,7 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
             </>
           ) : isOpenCodeGoActive() ? (
             <>
-              <text fg={theme?.textMuted ?? "#888888"}>Quota</text>
+              <text fg={muted}>Quota</text>
               {!goQuota() && goQuotaLoading() ? (
                 <text fg="#888888">Loading...</text>
               ) : goQuota() ? (
@@ -569,25 +565,25 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
                 (goQuota()!.monthly?.usagePercent ?? 0) === 0 ? (
                   <box flexDirection="column" gap={0}>
                     <text fg="#eab308">⚠ Unable to fetch Go quota</text>
-                    <text fg={theme?.textMuted ?? "#888888"}>Set OPENCODE_GO_AUTH_COOKIE with your browser's auth cookie</text>
+                    <text fg={muted}>Set OPENCODE_GO_AUTH_COOKIE with your browser's auth cookie</text>
                   </box>
                 ) : (
                   <box flexDirection="column" gap={0}>
-                    <text fg={theme?.textMuted ?? "#888888"}>Rolling (5h)</text>
+                    <text fg={muted}>Rolling (5h)</text>
                     <text fg={getUsageColor(goQuota()!.rolling?.usagePercent ?? 0)}>
                       {goQuota()!.rolling?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.rolling?.resetInSec ?? 0)}
                     </text>
                     <text fg={getUsageColor(goQuota()!.rolling?.usagePercent ?? 0)}>
                       {buildProgressBar(goQuota()!.rolling?.usagePercent ?? 0)}
                     </text>
-                    <text fg={theme?.textMuted ?? "#888888"}>Weekly</text>
+                    <text fg={muted}>Weekly</text>
                     <text fg={getUsageColor(goQuota()!.weekly?.usagePercent ?? 0)}>
                       {goQuota()!.weekly?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.weekly?.resetInSec ?? 0)}
                     </text>
                     <text fg={getUsageColor(goQuota()!.weekly?.usagePercent ?? 0)}>
                       {buildProgressBar(goQuota()!.weekly?.usagePercent ?? 0)}
                     </text>
-                    <text fg={theme?.textMuted ?? "#888888"}>Monthly</text>
+                    <text fg={muted}>Monthly</text>
                     <text fg={getUsageColor(goQuota()!.monthly?.usagePercent ?? 0)}>
                       {goQuota()!.monthly?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.monthly?.resetInSec ?? 0)}
                     </text>

@@ -14,14 +14,7 @@ import { createLoadGuard } from "./shared/reload"
 import type { SessionMessagesResponse } from "@opencode-ai/sdk/v2"
 import { loadSystemSnapshot, loadBaselineTokens, loadFinalSystemOverride, analyzeSessionMessages, type AnalysisData, type CategoryEntry, type Category, type FormattedHotspotResult } from "./analyze-domain"
 import { useDialogSizing } from "./wlib/dialog"
-
-interface ThemeColors {
-  foreground?: string
-  muted?: string
-  red?: string
-  primary?: string
-  selectedListItemText?: string
-}
+import { resolveThemeColors } from "./wlib/theme"
 
 export function registerAnalyzeCommand(api: TuiPluginApi) {
   api.keymap.registerLayer({
@@ -42,8 +35,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           if (!currentSessionID) {
             api.ui.dialog.replace(() => {
               onMount(() => { api.ui.dialog.setSize("medium") })
-              const fg = api.theme.current?.foreground ?? "#ffffff"
-              const muted = api.theme.current?.muted ?? "#888888"
+              const { fg, muted } = resolveThemeColors(api.theme.current)
               return (
                 <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
                   <box flexDirection="row" justifyContent="space-between">
@@ -61,12 +53,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           }
 
           // ── Derived values ───────────────────────────────────────────────
-          const theme = api.theme.current
-          const fg = theme?.text ?? "#ffffff"
-          const muted = theme?.textMuted ?? "#888888"
-          const red = theme?.error ?? "#ef4444"
-          const primary = (theme as ThemeColors)?.primary
-          const selectedText = (theme as ThemeColors)?.selectedListItemText
+          const { fg, muted, red, primary, selectedText } = resolveThemeColors(api.theme.current)
           const BAR_WIDTH = 50
           const sidDisplay = currentSessionID.length > 8
             ? currentSessionID.slice(0, 8) + "…"
@@ -221,7 +208,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           // ── Reactive dialog ──────────────────────────────────────────────
           api.ui.dialog.replace(() => {
             // Desired large/40 — falls back to fit the terminal (never cut off).
-            const dialogSizing = useDialogSizing({ size: "large", maxHeight: 40 })
+            const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
             createEffect(() => {
               api.ui.dialog.setSize(dialogSizing().size)
             })
