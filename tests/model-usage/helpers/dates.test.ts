@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { getWeekMonday, getWeekInfo } from "@model-usage/helpers/dates"
+import { computeMinOffsets, getWeekMonday, getWeekInfo } from "@model-usage/helpers/dates"
 import { formatPercentDiff } from "@model-usage/helpers/format"
 
 describe("getWeekMonday", () => {
@@ -78,6 +78,68 @@ describe("getWeekInfo", () => {
     expect(info.endMs - info.startMs).toBe(7 * 24 * 60 * 60 * 1000)
     expect(typeof info.label).toBe("string")
     expect(info.label.length).toBeGreaterThan(0)
+  })
+})
+
+describe("computeMinOffsets", () => {
+  // computeMinOffsets returns clean integers (0 instead of -0). Assert exact
+  // values directly so a regression back to -0 fails loudly.
+  function assertOffsets(earliestMs: number | null, now: Date, expected: { minMonthOffset: number; minWeekOffset: number; minDayOffset: number }) {
+    const result = computeMinOffsets(earliestMs, now)
+    expect(result.minMonthOffset).toBe(expected.minMonthOffset)
+    expect(result.minWeekOffset).toBe(expected.minWeekOffset)
+    expect(result.minDayOffset).toBe(expected.minDayOffset)
+  }
+
+  it("earliestMs is null → all offsets are 0", () => {
+    const now = new Date(Date.UTC(2026, 6, 15))
+    assertOffsets(null, now, { minMonthOffset: 0, minWeekOffset: 0, minDayOffset: 0 })
+  })
+
+  it("earliestMs in the same month/week/day as now → all offsets are 0", () => {
+    const now = new Date(Date.UTC(2026, 6, 6))
+    assertOffsets(Date.UTC(2026, 6, 6), now, { minMonthOffset: 0, minWeekOffset: 0, minDayOffset: 0 })
+  })
+
+  it("earliestMs one month earlier (same day) → month offset -1 with correct week/day deltas", () => {
+    // earliest = Mon Jun 15 2026, now = Wed Jul 15 2026
+    const now = new Date(Date.UTC(2026, 6, 15))
+    assertOffsets(Date.UTC(2026, 5, 15), now, { minMonthOffset: -1, minWeekOffset: -4, minDayOffset: -30 })
+  })
+
+  it("cross-year boundary: Dec previous year → Jan current year → month offset -1", () => {
+    // earliest = Mon Dec 1 2025, now = Mon Jan 5 2026
+    const now = new Date(Date.UTC(2026, 0, 5))
+    assertOffsets(Date.UTC(2025, 11, 1), now, { minMonthOffset: -1, minWeekOffset: -5, minDayOffset: -35 })
+  })
+
+  it("several months back: Jan 2026 → Jul 2026 → month offset -6", () => {
+    // earliest = Mon Jan 5 2026, now = Mon Jul 6 2026 (182 days apart)
+    const now = new Date(Date.UTC(2026, 6, 6))
+    assertOffsets(Date.UTC(2026, 0, 5), now, { minMonthOffset: -6, minWeekOffset: -26, minDayOffset: -182 })
+  })
+
+  it("earliest three days ago → day offset -3", () => {
+    // earliest = Sun Jul 12 2026, now = Wed Jul 15 2026
+    const now = new Date(Date.UTC(2026, 6, 15))
+    assertOffsets(Date.UTC(2026, 6, 12), now, { minMonthOffset: 0, minWeekOffset: -1, minDayOffset: -3 })
+  })
+
+  it("earliest on the same day → day offset 0", () => {
+    const now = new Date(Date.UTC(2026, 6, 15))
+    assertOffsets(Date.UTC(2026, 6, 15), now, { minMonthOffset: 0, minWeekOffset: 0, minDayOffset: 0 })
+  })
+
+  it("earliest in the previous week (same weekday) → week offset -1", () => {
+    // earliest = Mon Jul 6 2026, now = Mon Jul 13 2026
+    const now = new Date(Date.UTC(2026, 6, 13))
+    assertOffsets(Date.UTC(2026, 6, 6), now, { minMonthOffset: 0, minWeekOffset: -1, minDayOffset: -7 })
+  })
+
+  it("Sunday before a Monday counts as the previous week (getWeekMonday rollback)", () => {
+    // earliest = Sun Jul 12 2026 (rolls back to Mon Jul 6), now = Mon Jul 13 2026
+    const now = new Date(Date.UTC(2026, 6, 13))
+    assertOffsets(Date.UTC(2026, 6, 12), now, { minMonthOffset: 0, minWeekOffset: -1, minDayOffset: -1 })
   })
 })
 

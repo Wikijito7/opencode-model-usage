@@ -1,4 +1,4 @@
-const MS_PER_DAY = 86_400_000
+export const MS_PER_DAY = 86_400_000
 
 export function getMonthInfo(year?: number, month?: number): { startMs: number; endMs: number; label: string } {
   const now = new Date()
@@ -35,4 +35,35 @@ export function getWeekInfo(date: Date): { startMs: number; endMs: number; label
   const endLabel = sunday.toLocaleString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
 
   return { startMs, endMs, label: `${startLabel} – ${endLabel}` }
+}
+
+export function computeMinOffsets(earliestMs: number | null, now: Date): { minMonthOffset: number; minWeekOffset: number; minDayOffset: number } {
+  if (earliestMs == null) {
+    return { minMonthOffset: 0, minWeekOffset: 0, minDayOffset: 0 }
+  }
+  const earliestDate = new Date(earliestMs)
+  const earliestYear = earliestDate.getUTCFullYear()
+  const earliestMonth = earliestDate.getUTCMonth()
+  const currentYear = now.getUTCFullYear()
+  const currentMonth = now.getUTCMonth()
+  const monthsBack = (currentYear * 12 + currentMonth) - (earliestYear * 12 + earliestMonth)
+  const minMonthOffset = monthsBack === 0 ? 0 : -monthsBack
+
+  const earliestWeekMonday = getWeekMonday(earliestDate).getTime()
+  const currentWeekMonday = getWeekMonday(now).getTime()
+  let minWeekOffset = 0
+  if (earliestWeekMonday < currentWeekMonday) {
+    const diffWeeks = Math.floor((currentWeekMonday - earliestWeekMonday) / (7 * MS_PER_DAY))
+    minWeekOffset = -diffWeeks
+  }
+
+  const earliestDayStart = Date.UTC(earliestDate.getUTCFullYear(), earliestDate.getUTCMonth(), earliestDate.getUTCDate())
+  const currentDayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  let minDayOffset = 0
+  if (earliestDayStart < currentDayStart) {
+    const diffDays = Math.floor((currentDayStart - earliestDayStart) / MS_PER_DAY)
+    minDayOffset = -diffDays
+  }
+
+  return { minMonthOffset, minWeekOffset, minDayOffset }
 }
