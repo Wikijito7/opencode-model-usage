@@ -7,9 +7,10 @@ import { Database } from "bun:sqlite"
 import { onMount, onCleanup, createSignal, createEffect } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets } from "./helpers/dates"
 import { log } from "./helpers/debug"
-import { fmt, fmtCost, buildBar, formatPercentDiff } from "./helpers/format"
+import { fmt, fmtCost, fmtCostPerMillion, buildBar, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, MAX_MODELS } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, ensureMessageTimeIndex, MAX_MODELS, fetchRootSessionTimestamps, type PeriodStats } from "./db"
+import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/scroll"
 import { registerDialogKeyLayer } from "./wlib/keys"
 import { useDialogSizing } from "./wlib/dialog"
@@ -75,6 +76,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [monthOffset, setMonthOffset] = createSignal(0)
           const [weekOffset, setWeekOffset] = createSignal(0)
           const [dayOffset, setDayOffset] = createSignal(0)
+          const [sortKey, setSortKey] = createSignal<ModelSortKey>("tokens")
+          const [periodStats, setPeriodStats] = createSignal<PeriodStats | null>(null)
           const scroll = makeScrollState(createSignal)
 
           const computeWindow = () => {
@@ -106,6 +109,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [diffInfo, setDiffInfo] = createSignal<{ arrow: string; text: string }>({ arrow: "\u2014", text: "\u2014" })
 
           const modelCache = new Map<string, UsageData>()
+          const buildingMonths = new Set<number>()
 
           function modelCacheKey(gran: Granularity, startMs: number): string {
             return `${gran}:${startMs}`
@@ -116,15 +120,42 @@ export function registerUsageCommand(api: TuiPluginApi) {
             setDiffInfo(formatPercentDiff(currentTotal, prev))
           }
 
+          function resolvePeriodStats(startMs: number, gran: Granularity): PeriodStats | null {
+            if (gran === "month") {
+              const mc = getMonthCache(startMs)
+              if (mc && mc.sessionCount != null && mc.messageCount != null) {
+                return { sessions: mc.sessionCount, messages: mc.messageCount }
+              }
+            } else {
+              const monthStart = Date.UTC(new Date(startMs).getUTCFullYear(), new Date(startMs).getUTCMonth(), 1)
+              const mc = getMonthCache(monthStart)
+              const list = gran === "week" ? mc?.weeks : mc?.days
+              const cached = list?.find(p => p.startMs === startMs)
+              if (cached && cached.sessionCount != null && cached.messageCount != null) {
+                return { sessions: cached.sessionCount, messages: cached.messageCount }
+              }
+            }
+            return null
+          }
+
           // ── Shared background pipeline (hierarchy build + forward prefetch) ──
           function scheduleHierarchyBuild(startMs: number, endMs: number, gran: Granularity) {
-            if (gran !== "month") return
+            const d = new Date(startMs)
+            const monthStart = gran === "month" ? startMs : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
+            const monthEnd = gran === "month" ? endMs : Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)
+            if (buildingMonths.has(monthStart)) return
+            buildingMonths.add(monthStart)
             setTimeout(() => {
+              buildingMonths.delete(monthStart)
               if (cleanedUp || !db) return
-              const rowsResult = fetchRawRows(db, startMs, endMs)
+              const rowsResult = fetchRawRows(db, monthStart, monthEnd)
               if (!("error" in rowsResult)) {
-                const period = buildHierarchy(rowsResult, startMs, endMs)
+                const sessResult = fetchRootSessionTimestamps(db, monthStart, monthEnd)
+                const sessionTimes = "error" in sessResult ? [] : sessResult
+                const period = buildHierarchy(rowsResult, sessionTimes, monthStart, monthEnd)
                 updateMonthCache(period)
+                const current = computeWindow()
+                setPeriodStats(resolvePeriodStats(current.startMs, granularity()))
               }
             }, 0)
           }
@@ -191,6 +222,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
           function loadData(forceRefresh: boolean = false) {
             const { startMs, endMs } = computeWindow()
             const gran = granularity()
+            const cachedStats = resolvePeriodStats(startMs, gran)
+            setPeriodStats(cachedStats)
             const cacheKey = modelCacheKey(gran, startMs)
 
             if (!forceRefresh) {
@@ -381,6 +414,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
               loadData()
               return true
             }
+            if (key === "o") {
+              setSortKey(k => k === "tokens" ? "cost" : k === "cost" ? "price" : "tokens")
+              return true
+            }
             if (key === "up") {
               return scroll.handleUp()
             }
@@ -445,6 +482,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   { key: "r",     cmd: "usage.reload",   desc: "Reload" },
                   { key: "t",     cmd: "usage.today",    desc: "Today" },
                   { key: "m",     cmd: "usage.toggleMode", desc: "Toggle mode" },
+                  { key: "o",     cmd: "usage.toggleSort", desc: "Sort" },
                   { key: "up",    cmd: "usage.scrollUp",   desc: "Scroll up" },
                   { key: "k",     cmd: "usage.scrollUp",   desc: "Scroll up" },
                   { key: "down",  cmd: "usage.scrollDown", desc: "Scroll down" },
@@ -458,6 +496,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   { name: "usage.reload",      title: "Reload Usage",   run: async () => { handleKey("r") } },
                   { name: "usage.today",       title: "Today",          run: async () => { handleKey("t") } },
                   { name: "usage.toggleMode",  title: "Toggle Mode",    run: async () => { handleKey("m") } },
+                  { name: "usage.toggleSort",  title: "Toggle Sort",    run: async () => { handleKey("o") } },
                   { name: "usage.scrollUp",    title: "Scroll Up",      run: async () => { handleKey("up") } },
                   { name: "usage.scrollDown",  title: "Scroll Down",    run: async () => { handleKey("down") } },
                   { name: "usage.pageUp",   title: "Page Up",   run: async () => { handleKey("pageup") } },
@@ -466,7 +505,9 @@ export function registerUsageCommand(api: TuiPluginApi) {
               })
               loadData()
               setTimeout(() => {
-                if (cleanedUp || !db) return
+                if (cleanedUp) return
+                ensureMessageTimeIndex(dbPath)
+                if (!db) return
                 const earliestMs = getEarliestUsageDate(db)
                 if (earliestMs != null) {
                   const off = computeMinOffsets(earliestMs, new Date())
@@ -490,6 +531,9 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   <box flexDirection="row" gap={1}>
                     <text fg={fg}><b>Usage{gran === "week" ? " / weekly" : gran === "day" ? " / daily" : ""}</b></text>
                     <text fg={muted}>{gran === "week" ? `\u2014 ${label}` : label}{arrows}</text>
+                    {periodStats() && (
+                      <text fg={muted}>{`\u00b7 ${periodStats()!.sessions} sessions \u00b7 ${periodStats()!.messages} messages`}</text>
+                    )}
                   </box>
                   <text fg={muted}>esc</text>
                 </box>
@@ -512,7 +556,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
                     (() => {
                       const data = viewState() as UsageData
                       const { models, totalInput, totalOutput, totalCost } = data
+                      const sortedModels = sortModels(models, sortKey())
                       const totalTokens = totalInput + totalOutput
+                      const moneySort = sortKey() === "cost" || sortKey() === "price"
+                      const shareTotal = moneySort ? totalCost : totalTokens
                       const hasCost = totalCost > 0
                       const emptyResult = models.length === 0
                       return emptyResult ? (
@@ -527,17 +574,24 @@ export function registerUsageCommand(api: TuiPluginApi) {
                           <text fg={muted}>  {"\u2191"} Input:  {fmt(totalInput)} tokens</text>
                           <text fg={muted}>  {"\u2193"} Output: {fmt(totalOutput)} tokens</text>
                           <text> </text>
-                          <text fg={fg}><b>Per Model</b> (top {models.length})</text>
+                          <text fg={fg}><b>Per Model</b> (top {models.length} · sorted by {sortKey()})</text>
                           <text> </text>
-                          {models.map((m, i) => {
+                          {sortedModels.map((m, i) => {
                             const modelTokens = m.totalInput + m.totalOutput
-                            const pct = totalTokens > 0 ? (modelTokens / totalTokens) * 100 : 0
+                            const shareValue = moneySort ? m.totalCost : modelTokens
+                            const pct = shareTotal > 0 ? (shareValue / shareTotal) * 100 : 0
                             const displayName = `${m.providerID}/${m.modelID}`
                             const modelHasCost = m.totalCost > 0
+                            const cpm = costPerMillion(m)
+                            const eff = cpm === null ? "" : (m.totalCost === 0 ? " \u00b7 free" : ` \u00b7 ${fmtCostPerMillion(cpm)}`)
                             return (
                               <box key={m.providerID + "/" + m.modelID} flexDirection="column" gap={1}>
                                 <text fg={fg}>{i + 1}. {displayName}</text>
-                                <text fg={muted}>{fmt(modelTokens)} tokens ({pct.toFixed(1)}%){modelHasCost ? ` \u2014 ${fmtCost(m.totalCost)}` : ""}</text>
+                                <text fg={muted}>
+                                  {moneySort
+                                    ? `${fmt(modelTokens)} tokens${modelHasCost ? ` \u2014 ${fmtCost(m.totalCost)}` : ""} (${pct.toFixed(1)}%)${eff}`
+                                    : `${fmt(modelTokens)} tokens (${pct.toFixed(1)}%)${modelHasCost ? ` \u2014 ${fmtCost(m.totalCost)}` : ""}${eff}`}
+                                </text>
                                 <text fg={fg}>{buildBar(pct, 50)}</text>
                                 {i < models.length - 1 && <text> </text>}
                               </box>
@@ -558,10 +612,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
                 {hasLoadedOnce() && (
                   <text fg={muted}>
                     {gran === "month"
-                      ? "t today  \u00b7  \u2190 \u2192 month  \u00b7  m mode  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
+                      ? "t today  \u00b7  \u2190 \u2192 month  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
                       : gran === "week"
-                        ? "t today  \u00b7  \u2190 \u2192 week  \u00b7  m mode  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
-                        : "t today  \u00b7  \u2190 \u2192 day  \u00b7  m mode  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"}
+                        ? "t today  \u00b7  \u2190 \u2192 week  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
+                        : "t today  \u00b7  \u2190 \u2192 day  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"}
                   </text>
                 )}
               </box>

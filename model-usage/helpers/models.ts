@@ -4,6 +4,7 @@
  */
 
 import { log } from "./debug"
+import type { ModelUsage } from "../types"
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -89,4 +90,58 @@ export function aggregateModelStats(records: readonly ModelUsageRecord[]): Model
   const result = Array.from(groups.values())
   log(`aggregateModelStats: completed aggregation into ${result.length} unique model groups`)
   return result
+}
+
+// ─── Sorting ─────────────────────────────────────────────────────────────────
+
+export type ModelSortKey = "tokens" | "cost" | "price"
+
+/**
+ * Cost per million tokens for a model (lower = cheaper).
+ * null when the model has zero tokens.
+ */
+export function costPerMillion(m: ModelUsage): number | null {
+  const total = m.totalInput + m.totalOutput
+  if (total === 0) return null
+  return (m.totalCost / total) * 1_000_000
+}
+
+/**
+ * Returns a NEW (non-mutating) array of models sorted.
+ * - "tokens": by (totalInput + totalOutput) descending.
+ * - "cost":   by totalCost descending.
+ * - "price":  by costPerMillion ascending (cheapest first); nulls (zero-token
+ *   models) sort last.
+ * Ties are broken deterministically by `providerID + "/" + modelID` ascending.
+ *
+ * Structured as a switch so a future "efficiency" key is a one-line addition.
+ */
+export function sortModels(models: readonly ModelUsage[], key: ModelSortKey): ModelUsage[] {
+  return [...models].sort((a, b) => {
+    let diff: number
+    switch (key) {
+      case "cost":
+        diff = b.totalCost - a.totalCost
+        break
+      case "price":
+        diff = priceCompare(a, b)
+        break
+      case "tokens":
+      default:
+        diff = (b.totalInput + b.totalOutput) - (a.totalInput + a.totalOutput)
+        break
+    }
+    if (diff !== 0) return diff
+    return `${a.providerID}/${a.modelID}`.localeCompare(`${b.providerID}/${b.modelID}`)
+  })
+}
+
+function priceCompare(a: ModelUsage, b: ModelUsage): number {
+  const pa = costPerMillion(a)
+  const pb = costPerMillion(b)
+  // Nulls (zero-token models) sort last, regardless of the other's value.
+  if (pa === null && pb === null) return 0
+  if (pa === null) return 1
+  if (pb === null) return -1
+  return pa - pb
 }

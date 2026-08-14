@@ -3,7 +3,11 @@ import { Database } from "bun:sqlite"
 import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { fetchRawRows, type RawUsageRow } from "@model-usage/db"
+import {
+  fetchRawRows,
+  fetchRootSessionTimestamps,
+  type RawUsageRow,
+} from "@model-usage/db"
 
 function setupDb(): { dbPath: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "opencode-test-"))
@@ -12,6 +16,11 @@ function setupDb(): { dbPath: string; cleanup: () => void } {
   db.run(`CREATE TABLE IF NOT EXISTS message (
     time_created INTEGER,
     data TEXT
+  )`)
+  db.run(`CREATE TABLE IF NOT EXISTS session (
+    id TEXT,
+    parent_id TEXT,
+    time_created INTEGER
   )`)
   db.close()
   return { dbPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
@@ -23,6 +32,19 @@ function insertMessage(dbPath: string, timeCreated: number, data: Record<string,
     db.run(`INSERT INTO message (time_created, data) VALUES (?, ?)`, [
       timeCreated,
       JSON.stringify(data),
+    ])
+  } finally {
+    db.close()
+  }
+}
+
+function insertSession(dbPath: string, id: string, parentId: string | null, timeCreated: number) {
+  const db = new Database(dbPath)
+  try {
+    db.run(`INSERT INTO session (id, parent_id, time_created) VALUES (?, ?, ?)`, [
+      id,
+      parentId,
+      timeCreated,
     ])
   } finally {
     db.close()
@@ -182,5 +204,58 @@ describe("fetchRawRows", () => {
 
     const rows = fetchRawRows(setup.dbPath, REFERENCE, REFERENCE + 86_400_000)
     expect(rows).toHaveLength(0)
+  })
+})
+
+describe("fetchRootSessionTimestamps", () => {
+  let setup: { dbPath: string; cleanup: () => void }
+  const REFERENCE = Date.UTC(2026, 6, 6, 12, 0, 0)
+
+  beforeEach(() => {
+    setup = setupDb()
+  })
+
+  afterEach(() => {
+    setup.cleanup()
+  })
+
+  it("returns only root-session time_created values in range", () => {
+    const t1 = REFERENCE
+    const t2 = REFERENCE + 3600_000
+    insertSession(setup.dbPath, "root1", null, t1)
+    insertSession(setup.dbPath, "root2", null, t2)
+    insertSession(setup.dbPath, "child", "root1", REFERENCE + 1000)
+    insertSession(setup.dbPath, "early", null, REFERENCE - 86_400_000)
+    insertSession(setup.dbPath, "late", null, REFERENCE + 86_400_000)
+
+    const result = fetchRootSessionTimestamps(setup.dbPath, REFERENCE, REFERENCE + 86_400_000)
+    expect(result).not.toHaveProperty("error")
+    const timestamps = result as number[]
+    expect(timestamps).toHaveLength(2)
+    expect(timestamps).toContain(t1)
+    expect(timestamps).toContain(t2)
+  })
+
+  it("empty DB returns []", () => {
+    const result = fetchRootSessionTimestamps(setup.dbPath, 0, REFERENCE + 86_400_000)
+    expect(Array.isArray(result)).toBe(true)
+    expect(result).toHaveLength(0)
+  })
+
+  it("boundary semantics: time_created == startMs included, == endMs excluded", () => {
+    insertSession(setup.dbPath, "atStart", null, REFERENCE)
+    insertSession(setup.dbPath, "atEnd", null, REFERENCE + 86_400_000)
+
+    const result = fetchRootSessionTimestamps(setup.dbPath, REFERENCE, REFERENCE + 86_400_000)
+    expect(result).not.toHaveProperty("error")
+    const timestamps = result as number[]
+    expect(timestamps).toEqual([REFERENCE])
+  })
+
+  it("nonexistent DB path → returns { error: string }", () => {
+    const result = fetchRootSessionTimestamps("/nonexistent/path/to/db.db", 0, REFERENCE + 86_400_000)
+    expect(result).toHaveProperty("error")
+    expect(typeof result.error).toBe("string")
+    expect(result.error.length).toBeGreaterThan(0)
   })
 })

@@ -43,10 +43,16 @@ export function computeUsageDataFromRows(rows: RawUsageRow[]): UsageData {
 
 // ─── Hierarchy builder ──────────────────────────────────────────────────────
 
-export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthEndMs: number): CachePeriod {
+export function buildHierarchy(rows: RawUsageRow[], rootSessionTimes: number[], monthStartMs: number, monthEndMs: number): CachePeriod {
   const dayMap = new Map<number, CachePeriod>()
   const dayModels = new Map<number, Map<string, { providerID: string; modelID: string; totalCost: number; totalInput: number; totalOutput: number }>>()
   const weekModels = new Map<number, Map<string, { providerID: string; modelID: string; totalCost: number; totalInput: number; totalOutput: number }>>()
+  // Root-session counts per day (bucketed the same way as day rows).
+  const sessionCounts = new Map<number, number>()
+  for (const t of rootSessionTimes) {
+    const bucket = Math.floor(t / MS_PER_DAY) * MS_PER_DAY
+    sessionCounts.set(bucket, (sessionCounts.get(bucket) ?? 0) + 1)
+  }
   for (const row of rows) {
     const dayMs = Math.floor(row.time_created / MS_PER_DAY) * MS_PER_DAY
     let day = dayMap.get(dayMs)
@@ -57,6 +63,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
         inputTokens: 0,
         outputTokens: 0,
         totalCost: 0,
+        messageCount: 0,
+        sessionCount: sessionCounts.get(dayMs) ?? 0,
         change: null,
         lastUpdated: Date.now(),
         weeks: null,
@@ -68,6 +76,7 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
     day.inputTokens += row.input_tokens
     day.outputTokens += row.output_tokens
     day.totalCost += row.cost
+    day.messageCount += 1
 
     if (row.provider_id && row.model_id) {
       let dm = dayModels.get(dayMs)
@@ -111,6 +120,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
         inputTokens: 0,
         outputTokens: 0,
         totalCost: 0,
+        messageCount: 0,
+        sessionCount: sessionCounts.get(dayMs) ?? 0,
         change: null,
         lastUpdated: Date.now(),
         weeks: null,
@@ -149,6 +160,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
     const inputTokens = w.days.reduce((s, d) => s + d.inputTokens, 0)
     const outputTokens = w.days.reduce((s, d) => s + d.outputTokens, 0)
     const totalCost = w.days.reduce((s, d) => s + d.totalCost, 0)
+    const messageCount = w.days.reduce((s, d) => s + (d.messageCount ?? 0), 0)
+    const sessionCount = w.days.reduce((s, d) => s + (d.sessionCount ?? 0), 0)
 
     let change: number | null = null
     if (i > 0) {
@@ -171,6 +184,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
       inputTokens,
       outputTokens,
       totalCost,
+      messageCount,
+      sessionCount,
       change,
       lastUpdated: Date.now(),
       weeks: null,
@@ -182,6 +197,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
   const totalInput = weeks.reduce((s, w) => s + w.inputTokens, 0)
   const totalOutput = weeks.reduce((s, w) => s + w.outputTokens, 0)
   const totalCostW = weeks.reduce((s, w) => s + w.totalCost, 0)
+  const totalMessageCount = weeks.reduce((s, w) => s + (w.messageCount ?? 0), 0)
+  const totalSessionCount = weeks.reduce((s, w) => s + (w.sessionCount ?? 0), 0)
 
   const monthModelMap = new Map<string, ModelUsage>()
   for (const [, dm] of dayModels) {
@@ -206,6 +223,8 @@ export function buildHierarchy(rows: RawUsageRow[], monthStartMs: number, monthE
     inputTokens: totalInput,
     outputTokens: totalOutput,
     totalCost: totalCostW,
+    messageCount: totalMessageCount,
+    sessionCount: totalSessionCount,
     change: null,
     lastUpdated: Date.now(),
     weeks,

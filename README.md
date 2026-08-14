@@ -76,10 +76,8 @@ model-usage/
 │   ├── sidebar.tsx                   # Usage sidebar widget
 │   ├── types.ts                      # Type definitions
 │   ├── usage-domain.ts               # Usage data domain logic
-│   ├── usage.test.ts                 # Usage unit tests
 │   ├── usage.tsx                     # /usage dialog
 │   ├── helpers/                      # Utility modules
-│   │   ├── clipboard.ts              # Raw text copy to clipboard
 │   │   ├── compaction.ts             # Compaction delta estimation
 │   │   ├── cost.ts                   # Cost formatting
 │   │   ├── dates.ts                  # Date utilities
@@ -91,9 +89,16 @@ model-usage/
 │   │   ├── model.ts                  # Model definitions
 │   │   ├── models.ts                # Per-model usage breakdown
 │   │   └── tokens.ts                # Token estimation (char/4)
-│   └── shared/                       # Shared UI utilities
-│       ├── keys.ts                   # Dialog key layer registration
-│       ├── reload.ts                 # Stale-load guard
-│       └── scroll.ts                 # Scroll state management
-└── tests/                            # Unit tests
+│   ├── wlib/                         # Shared helper submodule (git submodule)
+│   │   ├── clipboard.ts              # Raw text copy to clipboard
+│   │   ├── command.ts                # Palette slash command registration
+│   │   ├── dialog-fit.ts             # Responsive dialog fit sizing (pure)
+│   │   ├── dialog.tsx                # Responsive dialog sizing + dialog frame
+│   │   ├── keys.ts                   # Dialog-scoped key layer registration
+│   │   ├── log.ts                    # Unified debug logging
+│   │   ├── reload.ts                 # Stale-fetch guard
+│   │   ├── scroll.ts                 # Scroll state for scrollbox dialogs
+│   │   ├── system.ts                 # System prompt snapshot contract
+│   │   └── theme.ts                  # Normalized theme palette
+└── tests/                            # Unit tests (tests/model-usage/*.test.ts)
 ```
