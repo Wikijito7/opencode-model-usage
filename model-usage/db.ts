@@ -13,6 +13,38 @@ export interface RawUsageRow {
 
 export const MAX_MODELS = 10
 
+export interface PeriodStats {
+  sessions: number
+  messages: number
+}
+
+export function fetchRootSessionTimestamps(dbOrPath: Database | string, startMs: number, endMs: number): number[] | { error: string } {
+  let db: Database | null = null
+  let ownConnection = false
+  try {
+    if (typeof dbOrPath === "string") {
+      db = new Database(dbOrPath, { readonly: true })
+      ownConnection = true
+    } else {
+      db = dbOrPath
+    }
+
+    const rows = db
+      .query(
+        `SELECT time_created FROM session WHERE parent_id IS NULL AND time_created >= ? AND time_created < ?`
+      )
+      .all(startMs, endMs) as { time_created: number }[]
+
+    return (rows ?? []).map(r => r.time_created)
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    if (ownConnection) {
+      try { db?.close() } catch { /* ignore */ }
+    }
+  }
+}
+
 export function queryUsage(dbOrPath: Database | string, startMs: number, endMs: number): UsageData | { error: string } {
   let db: Database | null = null
   let ownConnection = false
@@ -147,6 +179,26 @@ export function getEarliestUsageDate(dbOrPath: Database | string): number | null
     if (ownConnection) {
       try { db?.close() } catch { /* ignore */ }
     }
+  }
+}
+
+/**
+ * Creates a time_created index on the `message` table if it does not exist.
+ * Opens a READ-WRITE connection (the plugin otherwise reads the DB read-only),
+ * wrapped so any failure (e.g. "database is locked") is non-fatal.
+ * Idempotent: a no-op when the index already exists.
+ */
+export function ensureMessageTimeIndex(dbPath: string): boolean {
+  let db: Database | null = null
+  try {
+    db = new Database(dbPath)
+    db.exec("PRAGMA busy_timeout = 3000")
+    db.exec("CREATE INDEX IF NOT EXISTS message_time_created_idx ON message(time_created)")
+    return true
+  } catch {
+    return false
+  } finally {
+    try { db?.close() } catch { /* ignore */ }
   }
 }
 

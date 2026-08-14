@@ -1,8 +1,8 @@
-import { describe, it, expect, spyOn, afterEach } from "bun:test"
-import type { RawUsageRow } from "./db"
+import { describe, it, expect, spyOn, beforeEach, afterEach } from "bun:test"
+import type { RawUsageRow } from "@model-usage/db"
 import * as fs from "node:fs"
-import { migrateV2Cache, CACHE_VERSION, MS_PER_DAY, scheduleDiskSave, flushDiskSave, updateMonthCache } from "./cache"
-import { computeUsageDataFromRows, buildHierarchy } from "./usage-domain"
+import { migrateV2Cache, CACHE_VERSION, MS_PER_DAY, scheduleDiskSave, flushDiskSave, updateMonthCache } from "@model-usage/cache"
+import { computeUsageDataFromRows, buildHierarchy } from "@model-usage/usage-domain"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -23,6 +23,24 @@ const REF_MONTH = 6 // July (0-indexed)
 const REF_MONTH_START = Date.UTC(REF_YEAR, REF_MONTH, 1)
 const REF_MONTH_END = Date.UTC(REF_YEAR, REF_MONTH + 1, 1)
 const REF_MID_MONTH = Date.UTC(REF_YEAR, REF_MONTH, 15, 12, 0, 0)
+
+// ─── Disk-write isolation ────────────────────────────────────────────────────────
+// Mock writeFileSync for the whole file so no test ever touches the real
+// `.usage-cache.json`. Any pending debounced save is flushed on teardown while
+// the mock is still active (flushing after restore would write to disk).
+
+let writeSpy: ReturnType<typeof spyOn>
+
+beforeEach(() => {
+  writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
+  writeSpy.mockClear()
+})
+
+afterEach(() => {
+  // Flush any pending debounced save while writeFileSync is still mocked.
+  flushDiskSave()
+  writeSpy.mockRestore()
+})
 
 // ─── Suite 1: migrateV2Cache ─────────────────────────────────────────────────────
 
@@ -165,7 +183,7 @@ describe("buildHierarchy", () => {
         output_tokens: 100,
       }),
     ]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
     expect(result.models.length).toBeGreaterThan(0)
     expect(result.models[0].providerID).toBe("openai")
     expect(result.models[0].modelID).toBe("gpt-4")
@@ -184,7 +202,7 @@ describe("buildHierarchy", () => {
         output_tokens: 150,
       }),
     ]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
     expect(result.weeks.length).toBeGreaterThan(0)
     const weekWithData = result.weeks.find(w => w.models !== null && w.models.length > 0)
     expect(weekWithData).toBeDefined()
@@ -203,7 +221,7 @@ describe("buildHierarchy", () => {
         output_tokens: 25,
       }),
     ]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
     expect(result.days.length).toBeGreaterThan(0)
     const dayWithData = result.days.find(d => d.models !== null && d.models.length > 0)
     expect(dayWithData).toBeDefined()
@@ -216,7 +234,7 @@ describe("buildHierarchy", () => {
       makeRow({ time_created: REF_MONTH_START + MS_PER_DAY * 1, provider_id: "a", model_id: "m1" }),
       makeRow({ time_created: REF_MONTH_START + MS_PER_DAY * 2, provider_id: "b", model_id: "m2" }),
     ]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
 
     // Recursively collect all ModelUsage-like objects and check them
     function collectModels(obj: any): any[] {
@@ -247,7 +265,7 @@ describe("buildHierarchy", () => {
   })
 
   it("empty rows produce valid structure with correct day count", () => {
-    const result = buildHierarchy([], REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy([], [], REF_MONTH_START, REF_MONTH_END)
     expect(result.startMs).toBe(REF_MONTH_START)
     expect(result.endMs).toBe(REF_MONTH_END)
     expect(result.inputTokens).toBe(0)
@@ -263,17 +281,66 @@ describe("buildHierarchy", () => {
   })
 })
 
+// ─── Suite 2b: buildHierarchy counts ────────────────────────────────────────────
+
+describe("buildHierarchy counts", () => {
+  it("computes per-day, per-week, and month-level message/session counts", () => {
+    const D1 = REF_MONTH_START + 5 * MS_PER_DAY
+    const D2 = REF_MONTH_START + 10 * MS_PER_DAY
+    const D3 = REF_MONTH_START + 20 * MS_PER_DAY
+
+    const rows: RawUsageRow[] = [
+      makeRow({ time_created: D1 }),
+      makeRow({ time_created: D1 }),
+      makeRow({ time_created: D2 }),
+    ]
+    const rootSessionTimes = [D1, D1, D1, D3]
+
+    const result = buildHierarchy(rows, rootSessionTimes, REF_MONTH_START, REF_MONTH_END)
+
+    // Month level
+    expect(result.messageCount).toBe(3)
+    expect(result.sessionCount).toBe(4)
+
+    const day = (ms: number) => result.days.find(d => d.startMs === ms)!
+
+    // Day D1: 2 messages, 3 sessions
+    expect(day(D1).messageCount).toBe(2)
+    expect(day(D1).sessionCount).toBe(3)
+
+    // Day D3: 0 messages, 1 session (root session on message-less day MUST be counted)
+    expect(day(D3).messageCount).toBe(0)
+    expect(day(D3).sessionCount).toBe(1)
+
+    // Day D2: 1 message, 0 sessions
+    expect(day(D2).messageCount).toBe(1)
+    expect(day(D2).sessionCount).toBe(0)
+
+    // A week containing D1 sums its days' counts correctly
+    const d1Week = result.weeks.find(w => w.days.some(d => d.startMs === D1))!
+    expect(d1Week).toBeDefined()
+    expect(d1Week.messageCount).toBe(d1Week.days.reduce((s, d) => s + (d.messageCount ?? 0), 0))
+    expect(d1Week.sessionCount).toBe(d1Week.days.reduce((s, d) => s + (d.sessionCount ?? 0), 0))
+  })
+
+  it("empty input yields zero message/session counts at month and day level", () => {
+    const result = buildHierarchy([], [], REF_MONTH_START, REF_MONTH_END)
+
+    expect(result.messageCount).toBe(0)
+    expect(result.sessionCount).toBe(0)
+
+    for (const day of result.days) {
+      expect(day.messageCount).toBe(0)
+      expect(day.sessionCount).toBe(0)
+    }
+  })
+})
+
 // ─── Suite 3: Debounced save ──────────────────────────────────────────────────────
 
 describe("Debounced save", () => {
-  afterEach(() => {
-    // Clear any leftover timer to avoid cross-test pollution
-    flushDiskSave()
-  })
-
   it("scheduleDiskSave debounces (only one setTimeout for two calls)", () => {
     const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(() => 42 as any)
-    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
 
     scheduleDiskSave()
     scheduleDiskSave()
@@ -282,12 +349,10 @@ describe("Debounced save", () => {
     expect(writeSpy).toHaveBeenCalledTimes(0)
 
     setTimeoutSpy.mockRestore()
-    writeSpy.mockRestore()
   })
 
   it("flushDiskSave writes immediately", () => {
     const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(() => 42 as any)
-    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
 
     scheduleDiskSave()
     flushDiskSave()
@@ -295,13 +360,11 @@ describe("Debounced save", () => {
     expect(writeSpy).toHaveBeenCalledTimes(1)
 
     setTimeoutSpy.mockRestore()
-    writeSpy.mockRestore()
   })
 
   it("flushDiskSave cancels pending timer", () => {
     const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(() => 42 as any)
     const clearTimeoutSpy = spyOn(globalThis, "clearTimeout").mockImplementation(() => {})
-    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
 
     scheduleDiskSave()
     flushDiskSave()
@@ -311,7 +374,6 @@ describe("Debounced save", () => {
 
     setTimeoutSpy.mockRestore()
     clearTimeoutSpy.mockRestore()
-    writeSpy.mockRestore()
   })
 })
 
@@ -422,6 +484,8 @@ describe("updateMonthCache", () => {
       inputTokens: 800,
       outputTokens: 200,
       totalCost: 0.1,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: null,
@@ -434,6 +498,8 @@ describe("updateMonthCache", () => {
       inputTokens: 1000,
       outputTokens: 500,
       totalCost: 0.15,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: null,
@@ -452,6 +518,8 @@ describe("updateMonthCache", () => {
       inputTokens: 500,
       outputTokens: 250,
       totalCost: 0.05,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: null,
@@ -469,6 +537,8 @@ describe("updateMonthCache", () => {
       inputTokens: 600,
       outputTokens: 300,
       totalCost: 0.09,
+      messageCount: 0,
+      sessionCount: 0,
       change: 10 as number | null,
       lastUpdated: Date.now(),
       weeks: null,
@@ -481,6 +551,8 @@ describe("updateMonthCache", () => {
       inputTokens: 1000,
       outputTokens: 500,
       totalCost: 0.15,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: [prevWeek],
@@ -493,6 +565,8 @@ describe("updateMonthCache", () => {
       inputTokens: 900,
       outputTokens: 450,
       totalCost: 0.12,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: null,
@@ -505,6 +579,8 @@ describe("updateMonthCache", () => {
       inputTokens: 1500,
       outputTokens: 750,
       totalCost: 0.21,
+      messageCount: 0,
+      sessionCount: 0,
       change: null as number | null,
       lastUpdated: Date.now(),
       weeks: [currFirstWeek],
@@ -583,7 +659,7 @@ describe("buildHierarchy edge cases", () => {
       makeRow({ time_created: REF_MONTH_START }),
       makeRow({ time_created: REF_MONTH_END - 1 }),
     ]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
     expect(result.days).toHaveLength(31)
     const daysWithData = result.days.filter(d => d.inputTokens > 0)
     expect(daysWithData).toHaveLength(2)
@@ -597,7 +673,7 @@ describe("buildHierarchy edge cases", () => {
 
   it("single row produces correct structure with rest days as zeros", () => {
     const rows = [makeRow({ time_created: REF_MID_MONTH })]
-    const result = buildHierarchy(rows, REF_MONTH_START, REF_MONTH_END)
+    const result = buildHierarchy(rows, [], REF_MONTH_START, REF_MONTH_END)
     expect(result.days).toHaveLength(31)
 
     const dayWithData = result.days.find(d => d.inputTokens > 0)!

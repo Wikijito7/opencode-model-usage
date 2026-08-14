@@ -4,10 +4,29 @@ import {
   CACHE_VERSION,
   migrateV2Cache,
   migrateV3Cache,
+  migrateV4Cache,
   getCachedEarliestTs,
   setCachedEarliestTs,
   flushDiskSave,
 } from "@model-usage/cache"
+
+// ─── Disk-write isolation ──────────────────────────────────────────────────────
+// Mock writeFileSync for the whole file so no test ever touches the real
+// `.usage-cache.json`. Any pending debounced save is flushed on teardown while
+// the mock is still active (flushing after restore would write to disk).
+
+let writeSpy: ReturnType<typeof spyOn>
+
+beforeEach(() => {
+  writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
+  writeSpy.mockClear()
+})
+
+afterEach(() => {
+  // Flush any pending debounced save while writeFileSync is still mocked.
+  flushDiskSave()
+  writeSpy.mockRestore()
+})
 
 // ─── Suite 1: migrateV3Cache ─────────────────────────────────────────────────
 
@@ -108,7 +127,136 @@ describe("migrateV2Cache v4 shape", () => {
   })
 })
 
-// ─── Suite 3: getCachedEarliestTs / setCachedEarliestTs ─────────────────────
+// ─── Suite 3: migrateV4Cache ────────────────────────────────────────────────
+
+describe("migrateV4Cache", () => {
+  it("returns version === CACHE_VERSION (5)", () => {
+    const result = migrateV4Cache({ months: {} })
+    expect(result.version).toBe(CACHE_VERSION)
+  })
+
+  it("sets messageCount/sessionCount to null on a month-level period", () => {
+    const input = {
+      months: {
+        "123": { inputTokens: 100, outputTokens: 50, messageCount: 10, sessionCount: 5 },
+      },
+    }
+    const result = migrateV4Cache(input)
+    expect(result.months["123"].messageCount).toBeNull()
+    expect(result.months["123"].sessionCount).toBeNull()
+  })
+
+  it("sets messageCount/sessionCount to null on nested week and day periods", () => {
+    const input = {
+      months: {
+        "1": {
+          weeks: [
+            {
+              messageCount: 7,
+              sessionCount: 3,
+              days: [{ messageCount: 2, sessionCount: 1 }],
+            },
+          ],
+          days: [{ messageCount: 4, sessionCount: 2 }],
+        },
+      },
+    }
+    const result = migrateV4Cache(input)
+
+    expect(result.months["1"].weeks![0].messageCount).toBeNull()
+    expect(result.months["1"].weeks![0].sessionCount).toBeNull()
+    expect(result.months["1"].weeks![0].days![0].messageCount).toBeNull()
+    expect(result.months["1"].weeks![0].days![0].sessionCount).toBeNull()
+    expect(result.months["1"].days![0].messageCount).toBeNull()
+    expect(result.months["1"].days![0].sessionCount).toBeNull()
+  })
+
+  it("preserves existing fields (inputTokens, totalCost, models) on the cloned result", () => {
+    const input = {
+      months: {
+        "123": {
+          inputTokens: 100,
+          outputTokens: 50,
+          totalCost: 1.25,
+          messageCount: 10,
+          sessionCount: 5,
+          models: [{ providerID: "openai", modelID: "gpt-4", totalCost: 1.25 }],
+          weeks: [
+            {
+              inputTokens: 60,
+              totalCost: 0.75,
+              messageCount: 6,
+              sessionCount: 3,
+              days: [{ inputTokens: 20, totalCost: 0.25, messageCount: 2, sessionCount: 1 }],
+            },
+          ],
+        },
+      },
+    }
+    const result = migrateV4Cache(input)
+
+    expect(result.months["123"].inputTokens).toBe(100)
+    expect(result.months["123"].totalCost).toBe(1.25)
+    expect(result.months["123"].models).toEqual([
+      { providerID: "openai", modelID: "gpt-4", totalCost: 1.25 },
+    ])
+    expect(result.months["123"].weeks![0].inputTokens).toBe(60)
+    expect(result.months["123"].weeks![0].totalCost).toBe(0.75)
+    expect(result.months["123"].weeks![0].days![0].totalCost).toBe(0.25)
+  })
+
+  it("deep-clones (mutating the result does not mutate input)", () => {
+    const input = {
+      months: {
+        "123": {
+          inputTokens: 100,
+          outputTokens: 50,
+          messageCount: 10,
+          sessionCount: 5,
+          models: [{ providerID: "openai", modelID: "gpt-4" }],
+        },
+      },
+    }
+    const result = migrateV4Cache(input)
+
+    // Migration sets messageCount/sessionCount to null but keeps the rest.
+    expect(result.months["123"]).toEqual({
+      ...input.months["123"],
+      messageCount: null,
+      sessionCount: null,
+    })
+
+    // Mutate the returned object deeply.
+    result.months["123"].inputTokens = 999
+    result.months["123"].models![0].modelID = "mutated"
+
+    // Input must be untouched.
+    expect(input.months["123"].inputTokens).toBe(100)
+    expect(input.months["123"].messageCount).toBe(10)
+    expect(input.months["123"].models![0].modelID).toBe("gpt-4")
+  })
+
+  it("handles missing months (undefined) → months === {}", () => {
+    const result = migrateV4Cache({ version: 4, earliestTs: 123 })
+    expect(result.months).toEqual({})
+  })
+
+  it("preserves earliestTs when it is a number, null otherwise", () => {
+    const withTs = migrateV4Cache({ months: {}, earliestTs: 123456 })
+    expect(withTs.earliestTs).toBe(123456)
+
+    const withoutTs = migrateV4Cache({ months: {} })
+    expect(withoutTs.earliestTs).toBeNull()
+
+    const nullTs = migrateV4Cache({ months: {}, earliestTs: null })
+    expect(nullTs.earliestTs).toBeNull()
+
+    const nonNumberTs = migrateV4Cache({ months: {}, earliestTs: "bogus" })
+    expect(nonNumberTs.earliestTs).toBeNull()
+  })
+})
+
+// ─── Suite 4: getCachedEarliestTs / setCachedEarliestTs ─────────────────────
 
 describe("getCachedEarliestTs / setCachedEarliestTs", () => {
   beforeEach(() => {
@@ -142,8 +290,9 @@ describe("getCachedEarliestTs / setCachedEarliestTs", () => {
 
   it("setCachedEarliestTs triggers a disk save after flushDiskSave", () => {
     const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(() => 42 as any)
-    const writeSpy = spyOn(fs, "writeFileSync").mockImplementation(() => {})
 
+    // Reset call count (the suite's beforeEach may have triggered a flush).
+    writeSpy.mockClear()
     setCachedEarliestTs(123456)
     expect(writeSpy).toHaveBeenCalledTimes(0)
 
@@ -151,6 +300,5 @@ describe("getCachedEarliestTs / setCachedEarliestTs", () => {
     expect(writeSpy).toHaveBeenCalledTimes(1)
 
     setTimeoutSpy.mockRestore()
-    writeSpy.mockRestore()
   })
 })

@@ -9,6 +9,10 @@ export function fmtCost(n: number): string {
   return `$${n.toFixed(2)}`
 }
 
+export function fmtCostPerMillion(costPerMillion: number): string {
+  return `$${costPerMillion.toFixed(2)}/1M`
+}
+
 export function buildBar(percentage: number, width: number = 50): string {
   const clamped = Math.max(0, Math.min(100, percentage))
   const filled = Math.max(0, Math.round((clamped / 100) * width))

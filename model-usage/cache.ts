@@ -6,7 +6,7 @@ export { MS_PER_DAY } from "./helpers/dates"
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 export const CACHE_TTL_MS = 60_000
-export const CACHE_VERSION = 4
+export const CACHE_VERSION = 5
 export const PREFETCH_DELAY_MS = 100
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -17,6 +17,8 @@ export interface CachePeriod {
   inputTokens: number
   outputTokens: number
   totalCost: number
+  messageCount: number | null
+  sessionCount: number | null
   change: number | null
   lastUpdated: number
   weeks: CachePeriod[] | null
@@ -54,6 +56,9 @@ function loadDiskCache() {
       const data = JSON.parse(raw)
       if (data.version === CACHE_VERSION && data.months) {
         usageCache = { ...data, earliestTs: typeof data.earliestTs === "number" ? data.earliestTs : null } as UsageCache
+      } else if (data.version === 4 && data.months) {
+        usageCache = migrateV4Cache(data)
+        saveDiskCache() // persist migration immediately
       } else if (data.version === 3 && data.months) {
         usageCache = migrateV3Cache(data)
         saveDiskCache() // persist migration immediately
@@ -120,6 +125,40 @@ export function migrateV3Cache(data: any): UsageCache {
   const cloned = JSON.parse(JSON.stringify(data))
   const months = cloned.months || {}
   return { version: CACHE_VERSION, months, earliestTs: null }
+}
+
+export function migrateV4Cache(data: any): UsageCache {
+  const cloned = JSON.parse(JSON.stringify(data))
+  const months = cloned.months || {}
+  for (const key of Object.keys(months)) {
+    const month = months[key]
+    if (!month) continue
+    month.messageCount = null
+    month.sessionCount = null
+    if (month.weeks) {
+      for (const w of month.weeks) {
+        w.messageCount = null
+        w.sessionCount = null
+        if (w.days) {
+          for (const d of w.days) {
+            d.messageCount = null
+            d.sessionCount = null
+          }
+        }
+      }
+    }
+    if (month.days) {
+      for (const d of month.days) {
+        d.messageCount = null
+        d.sessionCount = null
+      }
+    }
+  }
+  return {
+    version: CACHE_VERSION,
+    months,
+    earliestTs: typeof data.earliestTs === "number" ? data.earliestTs : null,
+  }
 }
 
 export function getMonthCache(startMs: number): CachePeriod | undefined {
