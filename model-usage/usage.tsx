@@ -4,20 +4,23 @@ import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { Database } from "bun:sqlite"
 
-import { onMount, onCleanup, createSignal, createEffect } from "solid-js"
+import { onMount, onCleanup, createSignal, createEffect, createMemo } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets } from "./helpers/dates"
 import { log } from "./helpers/debug"
-import { fmt, fmtCost, fmtCostPerMillion, buildBar, formatPercentDiff } from "./helpers/format"
+import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, ensureMessageTimeIndex, MAX_MODELS, fetchRootSessionTimestamps, type PeriodStats } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, MAX_MODELS, fetchRootSessionTimestamps, type PeriodStats } from "./db"
 import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/scroll"
-import { registerDialogKeyLayer } from "./wlib/keys"
+import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
+import { buildHelpRows } from "./wlib/help"
+import { HelpOverlay } from "./wlib/help-overlay"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs } from "./cache"
-import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal } from "./usage-domain"
+import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
+import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
 export function registerUsageCommand(api: TuiPluginApi) {
   api.keymap.registerLayer({
@@ -32,7 +35,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const dbPath = `${homedir()}/.local/share/opencode/opencode.db`
           const now = new Date()
 
-          const { fg, muted, red } = resolveThemeColors(api.theme.current)
+          const { fg, muted, red, panel } = resolveThemeColors(api.theme.current)
 
           if (!existsSync(dbPath)) {
             api.ui.dialog.replace(() => {
@@ -78,6 +81,21 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [dayOffset, setDayOffset] = createSignal(0)
           const [sortKey, setSortKey] = createSignal<ModelSortKey>("tokens")
           const [periodStats, setPeriodStats] = createSignal<PeriodStats | null>(null)
+          const [showTrends, setShowTrends] = createSignal(false)
+          const [showHelp, setShowHelp] = createSignal(false)
+          const trendSeries = createMemo(() => {
+            if (!showTrends()) return null
+            return computeTrendSeries(
+              granularity(),
+              Date.now(),
+              getMonthCache,
+              (s, e) => {
+                if (!db) return []
+                const r = queryDailyTotals(db, s, e)
+                return "error" in r ? [] : r
+              },
+            )
+          })
           const scroll = makeScrollState(createSignal)
 
           const computeWindow = () => {
@@ -315,8 +333,44 @@ export function registerUsageCommand(api: TuiPluginApi) {
 
           let cleanupKeyLayer: (() => void) | null = null
 
+          // Single source of truth for dialog key bindings — consumed by BOTH
+          // registerDialogKeyLayer and buildHelpRows (via the HelpOverlay).
+          const usageBindings: KeyBinding[] = [
+            { key: "left",     cmd: "usage.navLeft",     desc: "Previous" },
+            { key: "right",    cmd: "usage.navRight",    desc: "Next" },
+            { key: "r",        cmd: "usage.reload",      desc: "Reload" },
+            { key: "t",        cmd: "usage.today",       desc: "Today" },
+            { key: "m",        cmd: "usage.toggleMode",  desc: "Mode" },
+            { key: "o",        cmd: "usage.toggleSort",  desc: "Sort" },
+            { key: "g",        cmd: "usage.trends",      desc: "Trends" },
+            { key: "h",        cmd: "usage.help",        desc: "Help" },
+            { key: "escape",   cmd: "usage.escape",      desc: "Close" },
+            { key: "up",       cmd: "usage.scrollUp",    desc: "Scroll up" },
+            { key: "down",     cmd: "usage.scrollDown",  desc: "Scroll down" },
+            { key: "pageup",   cmd: "usage.pageUp",      desc: "Page up" },
+            { key: "pagedown", cmd: "usage.pageDown",    desc: "Page down" },
+          ]
+
           function handleKey(key: string) {
-            if (key === "left" || key === "h") {
+            if (showHelp()) {
+              if (key === "h" || key === "escape") {
+                setShowHelp(false)
+              }
+              return true
+            }
+            if (key === "g") {
+              setShowTrends(v => !v)
+              return true
+            }
+            if (key === "h") {
+              setShowHelp(v => !v)
+              return true
+            }
+            if (key === "escape") {
+              api.ui.dialog.clear()
+              return true
+            }
+            if (key === "left") {
               if (granularity() === "month") {
                 if (monthOffset() <= minMonthOffset()) return true
                 setMonthOffset(p => p - 1)
@@ -331,7 +385,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
               loadData()
               return true
             }
-            if (key === "right" || key === "l") {
+            if (key === "right") {
               if (granularity() === "month") {
                 if (monthOffset() >= 0) return true
                 setMonthOffset(p => p + 1)
@@ -474,22 +528,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
 
             onMount(() => {
               cleanupKeyLayer = registerDialogKeyLayer(api, {
-                bindings: [
-                  { key: "left",  cmd: "usage.navLeft",  desc: "Previous" },
-                  { key: "h",     cmd: "usage.navLeft",  desc: "Previous" },
-                  { key: "right", cmd: "usage.navRight", desc: "Next" },
-                  { key: "l",     cmd: "usage.navRight", desc: "Next" },
-                  { key: "r",     cmd: "usage.reload",   desc: "Reload" },
-                  { key: "t",     cmd: "usage.today",    desc: "Today" },
-                  { key: "m",     cmd: "usage.toggleMode", desc: "Toggle mode" },
-                  { key: "o",     cmd: "usage.toggleSort", desc: "Sort" },
-                  { key: "up",    cmd: "usage.scrollUp",   desc: "Scroll up" },
-                  { key: "k",     cmd: "usage.scrollUp",   desc: "Scroll up" },
-                  { key: "down",  cmd: "usage.scrollDown", desc: "Scroll down" },
-                  { key: "j",     cmd: "usage.scrollDown", desc: "Scroll down" },
-                  { key: "pageup",   cmd: "usage.pageUp",   desc: "Page up" },
-                  { key: "pagedown", cmd: "usage.pageDown", desc: "Page down" },
-                ],
+                priority: 1,
+                bindings: usageBindings,
                 commands: [
                   { name: "usage.navLeft",     title: "Previous",       run: async () => { handleKey("left") } },
                   { name: "usage.navRight",    title: "Next",           run: async () => { handleKey("right") } },
@@ -497,6 +537,9 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   { name: "usage.today",       title: "Today",          run: async () => { handleKey("t") } },
                   { name: "usage.toggleMode",  title: "Toggle Mode",    run: async () => { handleKey("m") } },
                   { name: "usage.toggleSort",  title: "Toggle Sort",    run: async () => { handleKey("o") } },
+                  { name: "usage.trends",      title: "Toggle Trends",  run: async () => { handleKey("g") } },
+                  { name: "usage.help",        title: "Toggle Help",    run: async () => { handleKey("h") } },
+                  { name: "usage.escape",      title: "Close",          run: async () => { handleKey("escape") } },
                   { name: "usage.scrollUp",    title: "Scroll Up",      run: async () => { handleKey("up") } },
                   { name: "usage.scrollDown",  title: "Scroll Down",    run: async () => { handleKey("down") } },
                   { name: "usage.pageUp",   title: "Page Up",   run: async () => { handleKey("pageup") } },
@@ -526,6 +569,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             })
 
             return (
+              <>
               <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
                 <box flexDirection="row" justifyContent="space-between">
                   <box flexDirection="row" gap={1}>
@@ -562,10 +606,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
                       const shareTotal = moneySort ? totalCost : totalTokens
                       const hasCost = totalCost > 0
                       const emptyResult = models.length === 0
-                      return emptyResult ? (
-                        <text fg={muted}>{"\u2014"} No activity for {label}</text>
-                      ) : (
-                        <box paddingBottom={1}>
+                      const trends = showTrends()
+
+                      const summary = (
+                        <>
                           <text fg={fg}>Total: {fmt(totalTokens)} tokens{hasCost ? ` (${fmtCost(totalCost)})` : ""}{(() => {
                             const d = diffInfo()
                             if (d.text === "\u2014") return ""
@@ -573,6 +617,44 @@ export function registerUsageCommand(api: TuiPluginApi) {
                           })()}</text>
                           <text fg={muted}>  {"\u2191"} Input:  {fmt(totalInput)} tokens</text>
                           <text fg={muted}>  {"\u2193"} Output: {fmt(totalOutput)} tokens</text>
+                        </>
+                      )
+
+                      if (trends) {
+                        const series = trendSeries()!
+                        const max = Math.max(...series.values)
+                        const labelPad = Math.max(0, ...series.labels.map(l => l.length))
+                        const windowDesc = gran === "month" ? "last 12 months" : gran === "week" ? "last 12 weeks" : "last 30 days"
+                        return (
+                          <box paddingBottom={1}>
+                            {summary}
+                            <text> </text>
+                            <box flexDirection="row" gap={1}>
+                              <text fg={fg}><b>Trends</b></text>
+                              <text fg={muted}>· {windowDesc}</text>
+                            </box>
+                            <text> </text>
+                            {series.values.map((v, i) => {
+                              const pct = max > 0 ? (v / max) * 100 : 0
+                              return (
+                                <box flexDirection="row" gap={2}>
+                                  <text fg={fg}>{series.labels[i].padEnd(labelPad)}</text>
+                                  <text fg={fg}>{buildBar(pct, 30)}</text>
+                                  <text fg={muted}>{fmtCompact(v)}</text>
+                                </box>
+                              )
+                            })}
+                            <text> </text>
+                            {series.peakDay && <text fg={muted}>Most used on: {series.peakDay}</text>}
+                          </box>
+                        )
+                      }
+
+                      return emptyResult ? (
+                        <text fg={muted}>{"\u2014"} No activity for {label}</text>
+                      ) : (
+                        <box paddingBottom={1}>
+                          {summary}
                           <text> </text>
                           <text fg={fg}><b>Per Model</b> (top {models.length} · sorted by {sortKey()})</text>
                           <text> </text>
@@ -610,15 +692,13 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   )
                 })()}
                 {hasLoadedOnce() && (
-                  <text fg={muted}>
-                    {gran === "month"
-                      ? "t today  \u00b7  \u2190 \u2192 month  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
-                      : gran === "week"
-                        ? "t today  \u00b7  \u2190 \u2192 week  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"
-                        : "t today  \u00b7  \u2190 \u2192 day  \u00b7  m mode  \u00b7  o sort  \u00b7  r reload  \u00b7  PgUp/Dn \u2191\u2193 scroll"}
-                  </text>
+                  <text fg={muted}>← → {gran}  ·  ↑↓ scroll  ·  h help</text>
                 )}
               </box>
+              {showHelp() && (
+                <HelpOverlay rows={buildHelpRows(usageBindings)} fg={fg} muted={muted} bg={panel} title="Usage Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
+              )}
+              </>
             )
           }, () => {
             cleanedUp = true

@@ -155,6 +155,74 @@ export function fetchRawRows(dbOrPath: Database | string, startMs: number, endMs
   }
 }
 
+export interface DailyTotal {
+  day_start: number
+  input_tokens: number
+  output_tokens: number
+  cost: number
+}
+
+/**
+ * Aggregates assistant message token usage and cost per calendar day over the
+ * half-open range `[startMs, endMs)`.
+ *
+ * Each returned row represents one day, keyed by `day_start` (a non-negative
+ * ms-epoch truncated to the start of its UTC day, i.e. `Math.floor(t / MS_PER_DAY) * MS_PER_DAY`).
+ * `input_tokens`, `output_tokens`, and `cost` are summed per day via a single
+ * SQL `GROUP BY` over the day expression.
+ *
+ * @param dbOrPath - an already-open Database instance, or a filesystem path to
+ *   open a read-only connection (closed automatically on exit).
+ * @param startMs - inclusive start of the range as a ms-epoch.
+ * @param endMs - exclusive end of the range as a ms-epoch.
+ * @returns an array of `DailyTotal` rows ordered by `day_start` ascending, or
+ *   `{ error: string }` if the query fails.
+ */
+export function queryDailyTotals(
+  dbOrPath: Database | string,
+  startMs: number,
+  endMs: number,
+): DailyTotal[] | { error: string } {
+  let db: Database | null = null
+  let ownConnection = false
+  try {
+    if (typeof dbOrPath === "string") {
+      db = new Database(dbOrPath, { readonly: true })
+      ownConnection = true
+    } else {
+      db = dbOrPath
+    }
+
+    const rows = db
+      .query(
+        `SELECT
+           (time_created / 86400000) * 86400000 AS day_start,
+           SUM(CAST(json_extract(data,'$.tokens.input')  AS INTEGER)) AS input_tokens,
+           SUM(CAST(json_extract(data,'$.tokens.output') AS INTEGER)) AS output_tokens,
+           SUM(CAST(json_extract(data,'$.cost') AS REAL)) AS cost
+         FROM message
+         WHERE json_extract(data,'$.role') = 'assistant'
+           AND time_created >= ? AND time_created < ?
+         GROUP BY day_start
+         ORDER BY day_start ASC`,
+      )
+      .all(startMs, endMs) as DailyTotal[]
+
+    return (rows ?? []).map((r: DailyTotal) => ({
+      day_start: r.day_start,
+      input_tokens: r.input_tokens ?? 0,
+      output_tokens: r.output_tokens ?? 0,
+      cost: r.cost ?? 0,
+    }))
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    if (ownConnection) {
+      try { db?.close() } catch { /* ignore */ }
+    }
+  }
+}
+
 export function getEarliestUsageDate(dbOrPath: Database | string): number | null {
   let db: Database | null = null
   let ownConnection = false

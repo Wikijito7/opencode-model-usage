@@ -11,15 +11,15 @@ import { appendFileSync } from "node:fs"
 import { createLoadGuard } from "./wlib/reload"
 import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
 import { resolveThemeColors } from "./wlib/theme"
+import { PLUGIN_VERSION } from "./version"
 
 const log = logFn
 
 const QUOTA_REFRESH_MS = 5 * 60 * 1000
 const QUOTA_EVENT_MIN_INTERVAL_MS = 2 * 60 * 1000  // min gap between event-driven fetches
 const MAX_POLL_ATTEMPTS = 30
-const PLUGIN_VERSION = "v41"
 
-log(`=== usage-sidebar ${PLUGIN_VERSION} loaded ===`)
+log(`=== usage-sidebar v${PLUGIN_VERSION} loaded ===`)
 
 function getActiveModel(api: TuiPluginApi, sessionID: string): string | null {
   try {

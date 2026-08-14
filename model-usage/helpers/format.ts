@@ -57,15 +57,24 @@ export function truncateLabel(label: string, maxLen: number = 26): string {
 }
 
 /**
- * Compact "k"-suffixed formatting for large deltas.
+ * Compact "k"- and "M"-suffixed formatting for large deltas.
  * E.g., fmtCompact(45230) -> "45k", fmtCompact(999) -> "999",
- * fmtCompact(-1500) -> "-2k". Rounds to nearest thousand, keeps sign.
+ * fmtCompact(-1500) -> "-2k", fmtCompact(1_000_000) -> "1M",
+ * fmtCompact(1_500_000) -> "1.5M", fmtCompact(1_250_000) -> "1.3M",
+ * fmtCompact(-1_500_000) -> "-1.5M". Rounds to nearest thousand/million,
+ * keeps sign, and drops trailing ".0".
  */
 export function fmtCompact(n: number): string {
-  if (Math.abs(n) < 1000) {
-    return String(n)
+  const abs = Math.abs(n)
+  const sign = n < 0 ? "-" : ""
+  if (abs < 1000) return String(n)
+  if (abs < 1_000_000) {
+    const k = Math.round(abs / 1000)
+    return k >= 1000 ? `${sign}1M` : `${sign}${k}k`
   }
-  return `${Math.round(n / 1000)}k`
+  const millions = abs / 1_000_000
+  const oneDecimal = Math.round(millions * 10) / 10
+  return `${sign}${Number.isInteger(oneDecimal) ? oneDecimal : oneDecimal.toFixed(1)}M`
 }
 
 export function formatPercentDiff(current: number, previous: number | null): { arrow: string; text: string } {
