@@ -38,7 +38,7 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 
 - Bump: `git submodule update --remote --merge` at repo root, then commit the pointer change.
 - If the submodule working tree is dirty and the merge refuses: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib reset --hard origin/main` (only after confirming no local work).
-- Keep the deployed copy in sync: `cp -r model-usage/wlib ~/.config/opencode/plugins/model-usage/wlib`.
+- Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).
 - wlib source lives in the `opencode-wlib` repo — never edit its files only inside the submodule; upstream changes there first.
 
 ## Blockers (MUST NOT)
