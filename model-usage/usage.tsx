@@ -5,7 +5,8 @@ import { homedir } from "node:os"
 import { Database } from "bun:sqlite"
 
 import { onMount, onCleanup, createSignal, createEffect, createMemo } from "solid-js"
-import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets } from "./helpers/dates"
+import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets, getDaysInMonth, getDayOfMonth } from "./helpers/dates"
+import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
@@ -617,6 +618,16 @@ export function registerUsageCommand(api: TuiPluginApi) {
                           })()}</text>
                           <text fg={muted}>  {"\u2191"} Input:  {fmt(totalInput)} tokens</text>
                           <text fg={muted}>  {"\u2193"} Output: {fmt(totalOutput)} tokens</text>
+                          {granularity() === "month" && monthOffset() === 0 && totalCost > 0 && (() => {
+                            const elapsedDays = getDayOfMonth()
+                            const totalDays = getDaysInMonth()
+                            if (elapsedDays < MIN_ELAPSED_DAYS) {
+                              const n = MIN_ELAPSED_DAYS - elapsedDays
+                              return <text fg={muted}>  calculating projection... {n} {n === 1 ? "day" : "days"} to show</text>
+                            }
+                            const proj = projectBurnRate(totalCost, elapsedDays, totalDays)
+                            return proj ? <text fg={muted}>  on pace: {fmtCost(proj.projected)} by end of month</text> : null
+                          })()}
                         </>
                       )
 
