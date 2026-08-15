@@ -1,6 +1,6 @@
 import { getWeekMonday } from "./helpers/dates"
 import type { UsageData, ModelUsage } from "./types"
-import { MAX_MODELS, type RawUsageRow } from "./db"
+import { MAX_MODELS, type DailyTotal, type RawUsageRow } from "./db"
 import { type CachePeriod, MS_PER_DAY, getPrevMonthStartMs } from "./cache"
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -273,4 +273,165 @@ export function findPreviousPeriodTotal(
   }
 
   return previousTotal
+}
+
+// ─── Trend series ───────────────────────────────────────────────────────────
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const
+
+/**
+ * A time-series view of token usage over a trailing window.
+ *
+ * `values` holds one token total per bucket, ordered NEWEST → oldest (index 0
+ * is the current month/week/day), and is always zero-filled so its length
+ * exactly matches the requested granularity (12 for `"month"`/`"week"`, 30 for
+ * `"day"`). `labels` is a parallel array with one display label per bucket
+ * (also NEWEST → oldest). `peakDay` is the weekday name (e.g. `"Wednesday"`)
+ * with the highest aggregated token total across the window, or `null` when
+ * there is no data (every day's total is zero).
+ */
+export interface TrendSeries {
+  values: number[]       // token totals per bucket, NEWEST first (index 0 = current)
+  labels: string[]       // per-bucket labels, NEWEST first (parallel to values)
+  peakDay: string | null // e.g. "Wednesday", or null when no data
+}
+
+/**
+ * Computes a token-usage trend series over a granularity-defined trailing
+ * window, preferring cached per-day data over on-demand DB fetches.
+ *
+ * Window selection:
+ * - `"month"`: last 12 calendar months ending with the current month.
+ * - `"week"`: last 12 Monday-aligned weeks ending with the current week.
+ * - `"day"`: rolling last 30 days (`now - 30 * MS_PER_DAY`).
+ *
+ * For each calendar month overlapping the window, this function PREFERS the
+ * cache: if `getCachedMonth(monthStartMs)` returns a period with a non-null
+ * `days` array, those per-day totals (`inputTokens + outputTokens`) are used.
+ * Only for months the cache does not cover does it fall back to
+ * `fetchDaily(monthStartMs, monthEndMs)`, mapping each `DailyTotal`'s
+ * `day_start` → `input_tokens + output_tokens`. A per-day series over the whole
+ * window is then aggregated into the target buckets (zero-filled, NEWEST →
+ * oldest) and the peak weekday is derived from the per-day totals.
+ *
+ * The function is pure given its injected `getCachedMonth`/`fetchDaily` params;
+ * it performs no direct DB/cache access itself.
+ *
+ * @param gran - the bucketing granularity (`"month"` | `"week"` | `"day"`).
+ * @param now - the reference ms-epoch (the window ends at `now`).
+ * @param getCachedMonth - resolves a cached `CachePeriod` for a month start.
+ * @param fetchDaily - fetches per-day DB totals for `[startMs, endMs)`.
+ * @returns a `TrendSeries` with zero-filled bucketed values (NEWEST first),
+ *   parallel labels, and peak weekday.
+ */
+export function computeTrendSeries(
+  gran: Granularity,
+  now: number,
+  getCachedMonth: (ms: number) => CachePeriod | undefined,
+  fetchDaily: (startMs: number, endMs: number) => DailyTotal[],
+): TrendSeries {
+  const nowDate = new Date(now)
+  const currentYear = nowDate.getUTCFullYear()
+  const currentMonth = nowDate.getUTCMonth()
+
+  // Determine the window [startMs, now) by granularity.
+  const startMs = gran === "month"
+    ? Date.UTC(currentYear, currentMonth - 11, 1)
+    : gran === "week"
+      ? getWeekMonday(nowDate).getTime() - 11 * 7 * MS_PER_DAY
+      : now - 30 * MS_PER_DAY
+
+  const bucketCount = gran === "month" ? 12 : gran === "week" ? 12 : 30
+  const buckets = new Array<number>(bucketCount).fill(0)
+  const labels = new Array<string>(bucketCount)
+
+  // Build a per-day token series over the window, preferring cached days.
+  const dayMap = new Map<number, number>()
+  const endMs = now
+  let y = new Date(startMs).getUTCFullYear()
+  let m = new Date(startMs).getUTCMonth()
+  // Safety guard against infinite loops in the month-scan below.
+  const MAX_MONTHS_TO_SCAN = 1000
+  let guard = 0
+  while (guard++ < MAX_MONTHS_TO_SCAN) {
+    const monthStartMs = Date.UTC(y, m, 1)
+    if (monthStartMs >= endMs) break
+    const monthEndMs = Date.UTC(y, m + 1, 1)
+    const cached = getCachedMonth(monthStartMs)
+    if (cached && cached.days) {
+      for (const d of cached.days) {
+        if (d.startMs >= startMs && d.startMs < endMs) {
+          dayMap.set(d.startMs, (dayMap.get(d.startMs) ?? 0) + d.inputTokens + d.outputTokens)
+        }
+      }
+    } else {
+      for (const r of fetchDaily(monthStartMs, monthEndMs)) {
+        if (r.day_start >= startMs && r.day_start < endMs) {
+          dayMap.set(r.day_start, (dayMap.get(r.day_start) ?? 0) + r.input_tokens + r.output_tokens)
+        }
+      }
+    }
+    if (m === 11) { y++; m = 0 } else { m++ }
+  }
+
+  // Aggregate per-day totals into the target bucket (NEWEST → oldest; index 0 is the current period).
+  if (gran === "month") {
+    for (const [dayMs, tokens] of dayMap) {
+      const d = new Date(dayMs)
+      const offset = (currentYear - d.getUTCFullYear()) * 12 + (currentMonth - d.getUTCMonth())
+      if (offset >= 0 && offset < 12) buckets[offset] += tokens
+    }
+  } else if (gran === "week") {
+    const currentMonday = getWeekMonday(nowDate).getTime()
+    for (const [dayMs, tokens] of dayMap) {
+      const monday = getWeekMonday(new Date(dayMs)).getTime()
+      const offset = Math.round((currentMonday - monday) / (7 * MS_PER_DAY))
+      if (offset >= 0 && offset < 12) buckets[offset] += tokens
+    }
+  } else {
+    for (const [dayMs, tokens] of dayMap) {
+      const offset = Math.floor((now - dayMs) / MS_PER_DAY)
+      if (offset >= 0 && offset < 30) buckets[offset] += tokens
+    }
+  }
+
+  // Build a parallel label per bucket (NEWEST first: index 0 is the current period).
+  if (gran === "month") {
+    for (let i = 0; i < bucketCount; i++) {
+      const m = currentMonth - i
+      const y = currentYear + Math.floor(m / 12)
+      const mm = ((m % 12) + 12) % 12
+      labels[i] = new Date(Date.UTC(y, mm, 1)).toLocaleString("en-US", { month: "short", year: "numeric", timeZone: "UTC" })
+    }
+  } else if (gran === "week") {
+    const currentMonday = getWeekMonday(nowDate).getTime()
+    for (let i = 0; i < bucketCount; i++) {
+      const mondayMs = currentMonday - i * 7 * MS_PER_DAY
+      labels[i] = new Date(mondayMs).toLocaleString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
+    }
+  } else {
+    for (let i = 0; i < bucketCount; i++) {
+      const dayMs = Math.floor((now - i * MS_PER_DAY) / MS_PER_DAY) * MS_PER_DAY
+      labels[i] = new Date(dayMs).toLocaleString("en-US", { month: "short", day: "numeric", weekday: "short", timeZone: "UTC" })
+    }
+  }
+
+  // Determine the peak weekday from the per-day totals.
+  const weekdayTotals = [0, 0, 0, 0, 0, 0, 0]
+  let hasData = false
+  for (const [dayMs, tokens] of dayMap) {
+    if (tokens <= 0) continue
+    hasData = true
+    weekdayTotals[new Date(dayMs).getUTCDay()] += tokens
+  }
+  let peakDay: string | null = null
+  if (hasData) {
+    let peak = 0
+    for (let i = 1; i < 7; i++) {
+      if (weekdayTotals[i] > weekdayTotals[peak]) peak = i
+    }
+    peakDay = WEEKDAY_NAMES[peak]
+  }
+
+  return { values: buckets, labels, peakDay }
 }

@@ -23,15 +23,21 @@ describe("fmtCompact", () => {
   it("handles negative values >= 1000 preserving sign and rounding logic", () => {
     expect(fmtCompact(-1000)).toBe("-1k")
     expect(fmtCompact(-1499)).toBe("-1k")
-    expect(fmtCompact(-1500)).toBe("-1k") // JS Math.round(-1.5) = -1
+    // abs-based rounding: |−1500| rounds to 2, sign preserved
+    expect(fmtCompact(-1500)).toBe("-2k")
     expect(fmtCompact(-1501)).toBe("-2k")
     expect(fmtCompact(-45230)).toBe("-45k")
   })
 
-  it("handles very large values without an 'm' tier", () => {
-    expect(fmtCompact(1_000_000)).toBe("1000k")
-    expect(fmtCompact(12_345_678)).toBe("12346k")
-    expect(fmtCompact(-5_500_000)).toBe("-5500k")
+  it("formats values >= 1,000,000 to one-decimal 'M' values, dropping trailing '.0'", () => {
+    expect(fmtCompact(1_000_000)).toBe("1M")
+    expect(fmtCompact(1_500_000)).toBe("1.5M")
+    expect(fmtCompact(1_250_000)).toBe("1.3M")
+    expect(fmtCompact(-1_500_000)).toBe("-1.5M")
+  })
+
+  it("rolls k-tier values up to the M tier at the boundary", () => {
+    expect(fmtCompact(999_999)).toBe("1M")
   })
 })
 

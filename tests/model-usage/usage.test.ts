@@ -1,8 +1,8 @@
 import { describe, it, expect, spyOn, beforeEach, afterEach } from "bun:test"
-import type { RawUsageRow } from "@model-usage/db"
+import { type RawUsageRow, type DailyTotal } from "@model-usage/db"
 import * as fs from "node:fs"
-import { migrateV2Cache, CACHE_VERSION, MS_PER_DAY, scheduleDiskSave, flushDiskSave, updateMonthCache } from "@model-usage/cache"
-import { computeUsageDataFromRows, buildHierarchy } from "@model-usage/usage-domain"
+import { migrateV2Cache, CACHE_VERSION, MS_PER_DAY, scheduleDiskSave, flushDiskSave, updateMonthCache, type CachePeriod } from "@model-usage/cache"
+import { computeUsageDataFromRows, buildHierarchy, computeTrendSeries } from "@model-usage/usage-domain"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────────
 
@@ -690,5 +690,183 @@ describe("buildHierarchy edge cases", () => {
     for (const day of emptyDays) {
       expect(day.models).toEqual([])
     }
+  })
+})
+
+// ─── Suite 8: computeTrendSeries ────────────────────────────────────────────────
+
+  describe("computeTrendSeries", () => {
+  // Fixed reference time: July 15 2026 12:00 UTC (mid-month, mid-week).
+  const NOW = Date.UTC(2026, 6, 15, 12, 0, 0)
+
+  // Monday (UTC) of the week containing `ms`.
+  function getWeekMondayMs(ms: number): number {
+    const d = new Date(ms)
+    const day = d.getUTCDay() // 0 = Sunday … 6 = Saturday
+    const diff = day === 0 ? 6 : day - 1
+    const monday = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - diff))
+    return monday.getTime()
+  }
+
+  // Build a single cached per-day CachePeriod fixture.
+  function makeCachedDay(startMs: number, input = 0, output = 0): CachePeriod {
+    return {
+      startMs,
+      endMs: startMs + MS_PER_DAY,
+      inputTokens: input,
+      outputTokens: output,
+      totalCost: 0,
+      messageCount: 0,
+      sessionCount: 0,
+      change: null,
+      lastUpdated: 0,
+      weeks: null,
+      days: null,
+      models: null,
+    }
+  }
+
+  // Build a month-level CachePeriod carrying per-day entries (or null days).
+  function makeCachedMonth(startMs: number, days: CachePeriod[] | null): CachePeriod {
+    const input = (days ?? []).reduce((s, d) => s + d.inputTokens, 0)
+    const output = (days ?? []).reduce((s, d) => s + d.outputTokens, 0)
+    return {
+      startMs,
+      endMs: Date.UTC(new Date(startMs).getUTCFullYear(), new Date(startMs).getUTCMonth() + 1, 1),
+      inputTokens: input,
+      outputTokens: output,
+      totalCost: 0,
+      messageCount: 0,
+      sessionCount: 0,
+      change: null,
+      lastUpdated: 0,
+      weeks: null,
+      days,
+      models: null,
+    }
+  }
+
+  it('gran "day" produces exactly 30 zero-filled entries', () => {
+    const result = computeTrendSeries("day", NOW, () => undefined, () => [])
+    expect(result.values).toHaveLength(30)
+    expect(result.values).toEqual(new Array(30).fill(0))
+    expect(result.peakDay).toBeNull()
+    // Labels parallel values and are NEWEST first (index 0 = today).
+    expect(result.labels).toHaveLength(result.values.length)
+    const todayMs = Math.floor(NOW / MS_PER_DAY) * MS_PER_DAY
+    expect(result.labels[0]).toBe(
+      new Date(todayMs).toLocaleString("en-US", { month: "short", day: "numeric", weekday: "short", timeZone: "UTC" })
+    )
+  })
+
+  it('gran "week" produces exactly 12 entries', () => {
+    const result = computeTrendSeries("week", NOW, () => undefined, () => [])
+    expect(result.values).toHaveLength(12)
+    expect(result.labels).toHaveLength(result.values.length)
+  })
+
+  it('gran "month" produces exactly 12 entries', () => {
+    const result = computeTrendSeries("month", NOW, () => undefined, () => [])
+    expect(result.values).toHaveLength(12)
+    // Labels parallel values and are NEWEST first (index 0 = current month).
+    expect(result.labels).toHaveLength(result.values.length)
+    expect(result.labels[0]).toBe(
+      new Date(Date.UTC(2026, 6, 1)).toLocaleString("en-US", { month: "short", year: "numeric", timeZone: "UTC" })
+    )
+    expect(result.labels[1]).toBe(
+      new Date(Date.UTC(2026, 5, 1)).toLocaleString("en-US", { month: "short", year: "numeric", timeZone: "UTC" })
+    )
+  })
+
+  it("peakDay returns the weekday with the max aggregated token total (Wednesday)", () => {
+    const startMs = NOW - 30 * MS_PER_DAY
+    const days: CachePeriod[] = []
+    for (let i = 0; i < 30; i++) {
+      days.push(makeCachedDay(startMs + i * MS_PER_DAY, 100, 50)) // 150 tokens/day
+    }
+    // Boost every Wednesday by 400 input tokens so it dominates the aggregate.
+    for (const d of days) {
+      if (new Date(d.startMs).getUTCDay() === 3) {
+        d.inputTokens += 400
+      }
+    }
+    const juneStart = Date.UTC(2026, 5, 1)
+    const julyStart = Date.UTC(2026, 6, 1)
+    const cache = new Map<number, CachePeriod>([
+      [juneStart, makeCachedMonth(juneStart, days.filter(d => new Date(d.startMs).getUTCMonth() === 5))],
+      [julyStart, makeCachedMonth(julyStart, days.filter(d => new Date(d.startMs).getUTCMonth() === 6))],
+    ])
+    const result = computeTrendSeries("day", NOW, ms => cache.get(ms), () => [])
+    expect(result.peakDay).toBe("Wednesday")
+  })
+
+  it("peakDay returns null when every day total is zero", () => {
+    const result = computeTrendSeries("day", NOW, () => undefined, () => [
+      { day_start: NOW - MS_PER_DAY, input_tokens: 0, output_tokens: 0, cost: 0 },
+    ])
+    expect(result.peakDay).toBeNull()
+  })
+
+  it("prefers cached days and does not call fetchDaily for cached months", () => {
+    const day = makeCachedDay(NOW - MS_PER_DAY, 300, 200) // 500 tokens
+    const juneStart = Date.UTC(2026, 5, 1)
+    const julyStart = Date.UTC(2026, 6, 1)
+    const cache = new Map<number, CachePeriod>([
+      [juneStart, makeCachedMonth(juneStart, [])],
+      [julyStart, makeCachedMonth(julyStart, [day])],
+    ])
+    let fetchCalls = 0
+    const result = computeTrendSeries("day", NOW, ms => cache.get(ms), () => {
+      fetchCalls++
+      return []
+    })
+    expect(fetchCalls).toBe(0)
+    const offset = Math.floor((NOW - day.startMs) / MS_PER_DAY)
+    // NEWEST first: index 0 is the current day, so this day lands at `offset`.
+    expect(result.values[offset]).toBe(500)
+    expect(result.labels).toHaveLength(result.values.length)
+  })
+
+  it("falls back to fetchDaily when the cache is missing or has null days", () => {
+    const juneStart = Date.UTC(2026, 5, 1)
+    const julyStart = Date.UTC(2026, 6, 1)
+    // June: no cache entry at all. July: cache entry with days === null.
+    const cache = new Map<number, CachePeriod>([
+      [julyStart, makeCachedMonth(julyStart, null)],
+    ])
+    const daily: DailyTotal[] = [
+      { day_start: NOW - MS_PER_DAY, input_tokens: 300, output_tokens: 200, cost: 0 },
+    ]
+    let fetchCalls = 0
+    const result = computeTrendSeries("day", NOW, ms => cache.get(ms), (s, e) => {
+      fetchCalls++
+      // Mimic the real DB query: only return days within the requested month.
+      return daily.filter(r => r.day_start >= s && r.day_start < e)
+    })
+    expect(fetchCalls).toBe(2) // June + July both fall back to fetch
+    const offset = Math.floor((NOW - daily[0].day_start) / MS_PER_DAY)
+    // NEWEST first: index 0 is the current day, so this day lands at `offset`.
+    expect(result.values[offset]).toBe(500)
+    expect(result.labels).toHaveLength(result.values.length)
+  })
+
+  it("aggregates input+output tokens into the correct weekly bucket (newest → oldest)", () => {
+    // Current week is the week of Monday July 13 2026 → index 0 (current bucket).
+    const julyDays: DailyTotal[] = [
+      { day_start: Date.UTC(2026, 6, 13), input_tokens: 100, output_tokens: 50, cost: 0 },  // 150
+      { day_start: Date.UTC(2026, 6, 14), input_tokens: 200, output_tokens: 100, cost: 0 }, // 300
+      { day_start: Date.UTC(2026, 6, 15), input_tokens: 10, output_tokens: 5, cost: 0 },    // 15
+    ]
+    const result = computeTrendSeries("week", NOW, () => undefined, (s, e) =>
+      julyDays.filter(r => r.day_start >= s && r.day_start < e)
+    )
+    expect(result.values).toHaveLength(12)
+    // All three days fall in the current (newest) week bucket → index 0.
+    expect(result.values[0]).toBe(465)
+    expect(result.values.slice(1).every(v => v === 0)).toBe(true)
+    expect(result.labels).toHaveLength(result.values.length)
+    expect(result.labels[0]).toBe(
+      new Date(getWeekMondayMs(NOW)).toLocaleString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })
+    )
   })
 })

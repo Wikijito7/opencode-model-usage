@@ -6,6 +6,7 @@ import { join } from "node:path"
 import {
   fetchRawRows,
   fetchRootSessionTimestamps,
+  queryDailyTotals,
   type RawUsageRow,
 } from "@model-usage/db"
 
@@ -259,3 +260,136 @@ describe("fetchRootSessionTimestamps", () => {
     expect(result.error.length).toBeGreaterThan(0)
   })
 })
+
+describe("queryDailyTotals", () => {
+  let setup: { dbPath: string; cleanup: () => void }
+  const REFERENCE = Date.UTC(2026, 6, 6, 12, 0, 0)
+  const DAY = 86_400_000
+
+  beforeEach(() => {
+    setup = setupDb()
+  })
+
+  afterEach(() => {
+    setup.cleanup()
+  })
+
+  function assistantMessage(
+    timeCreated: number,
+    tokens: { input: number; output: number },
+    cost: number,
+  ) {
+    insertMessage(setup.dbPath, timeCreated, {
+      role: "assistant",
+      modelID: "gpt-4",
+      providerID: "copilot",
+      cost,
+      tokens,
+    })
+  }
+
+  it("multiple rows on the SAME day are grouped into ONE bucket with summed values", () => {
+    assistantMessage(REFERENCE + 1000, { input: 100, output: 50 }, 0.01)
+    assistantMessage(REFERENCE + 5000, { input: 200, output: 150 }, 0.03)
+    assistantMessage(REFERENCE + 10_000, { input: 50, output: 25 }, 0.005)
+
+    const result = queryDailyTotals(setup.dbPath, REFERENCE, REFERENCE + DAY)
+    expect(result).not.toHaveProperty("error")
+    const rows = result as { day_start: number; input_tokens: number; output_tokens: number; cost: number }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].day_start).toBe(Math.floor(REFERENCE / DAY) * DAY)
+    expect(rows[0].input_tokens).toBe(350)
+    expect(rows[0].output_tokens).toBe(225)
+    expect(rows[0].cost).toBeCloseTo(0.045, 6)
+  })
+
+  it("rows on DIFFERENT days produce separate buckets with day_start aligned to UTC midnight", () => {
+    const day0Start = Math.floor(REFERENCE / DAY) * DAY
+    const day1Start = day0Start + DAY
+    const day2Start = day0Start + 2 * DAY
+
+    // three distinct UTC days
+    assistantMessage(day0Start + 3600_000, { input: 100, output: 50 }, 0.01)
+    assistantMessage(day0Start + 7200_000, { input: 200, output: 100 }, 0.02)
+    assistantMessage(day1Start + 1000, { input: 300, output: 150 }, 0.03)
+    assistantMessage(day2Start + 60_000, { input: 400, output: 200 }, 0.04)
+
+    const result = queryDailyTotals(setup.dbPath, day0Start, day2Start + DAY)
+    expect(result).not.toHaveProperty("error")
+    const rows = result as { day_start: number; input_tokens: number; output_tokens: number; cost: number }[]
+
+    expect(rows).toHaveLength(3)
+    // ordered by day_start ASC
+    expect(rows[0].day_start).toBe(day0Start)
+    expect(rows[1].day_start).toBe(day1Start)
+    expect(rows[2].day_start).toBe(day2Start)
+
+    expect(rows[0].input_tokens).toBe(300)
+    expect(rows[0].output_tokens).toBe(150)
+    expect(rows[0].cost).toBeCloseTo(0.03, 6)
+
+    expect(rows[1].input_tokens).toBe(300)
+    expect(rows[1].output_tokens).toBe(150)
+    expect(rows[1].cost).toBeCloseTo(0.03, 6)
+
+    expect(rows[2].input_tokens).toBe(400)
+    expect(rows[2].output_tokens).toBe(200)
+    expect(rows[2].cost).toBeCloseTo(0.04, 6)
+  })
+
+  it("half-open boundary: time_created === startMs included, === endMs excluded", () => {
+    const start = dayStart(REFERENCE)
+    const end = start + DAY
+
+    assistantMessage(start, { input: 100, output: 50 }, 0.01)
+    assistantMessage(end, { input: 999, output: 999 }, 0.99)
+
+    const result = queryDailyTotals(setup.dbPath, start, end)
+    expect(result).not.toHaveProperty("error")
+    const rows = result as { day_start: number; input_tokens: number; output_tokens: number; cost: number }[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].day_start).toBe(start)
+    expect(rows[0].input_tokens).toBe(100)
+    expect(rows[0].output_tokens).toBe(50)
+    expect(rows[0].cost).toBeCloseTo(0.01, 6)
+  })
+
+  it("a range with no rows returns []", () => {
+    const result = queryDailyTotals(setup.dbPath, REFERENCE, REFERENCE + DAY)
+    expect(Array.isArray(result)).toBe(true)
+    expect(result).toHaveLength(0)
+  })
+
+  it("non-assistant roles are excluded", () => {
+    insertMessage(setup.dbPath, REFERENCE + 1000, {
+      role: "user",
+      modelID: null,
+      providerID: null,
+      cost: 0,
+      tokens: { input: 1000, output: 1000 },
+    })
+    insertMessage(setup.dbPath, REFERENCE + 2000, {
+      role: "system",
+      modelID: null,
+      providerID: null,
+      cost: 0,
+      tokens: { input: 500, output: 500 },
+    })
+
+    const result = queryDailyTotals(setup.dbPath, REFERENCE, REFERENCE + DAY)
+    expect(Array.isArray(result)).toBe(true)
+    expect(result).toHaveLength(0)
+  })
+
+  it("nonexistent DB path → returns { error: string }", () => {
+    const result = queryDailyTotals("/nonexistent/path/to/db.db", 0, REFERENCE + DAY)
+    if (!("error" in result)) throw new Error("expected error result")
+    expect(result).toHaveProperty("error")
+    expect(typeof result.error).toBe("string")
+    expect(result.error.length).toBeGreaterThan(0)
+  })
+})
+
+function dayStart(ms: number): number {
+  return Math.floor(ms / 86_400_000) * 86_400_000
+}
