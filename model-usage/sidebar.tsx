@@ -7,6 +7,8 @@ import { log as logFn, DEBUG, logPath } from "./helpers/debug"
 import { isSupportedModel } from "./helpers/model"
 import { buildProgressBar, getUsageColor, getQuotaLabel, formatDuration } from "./helpers/format"
 import { splitCost } from "./helpers/cost"
+import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
+import { getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "./helpers/dates"
 import { appendFileSync } from "node:fs"
 import { createLoadGuard } from "./wlib/reload"
 import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
@@ -295,6 +297,19 @@ function useQuotaFetching(props: { api: TuiPluginApi; sessionID: string; githubT
 
 // ─── Sidebar component ────────────────────────────────────────────────────────
 
+function renderProjectionLine(usedPct: number, muted: string) {
+  if (usedPct <= 0) return null
+  const elapsedDays = getDayOfMonth()
+  const totalDays = getDaysInMonth()
+  const endLabel = getMonthEndLabel()
+  if (elapsedDays < MIN_ELAPSED_DAYS) {
+    const n = MIN_ELAPSED_DAYS - elapsedDays
+    return <text fg={muted}>calculating projection... {n} {n === 1 ? "day" : "days"} to show</text>
+  }
+  const proj = projectBurnRate(usedPct, elapsedDays, totalDays)
+  return proj ? <text fg={proj.pct > 100 ? "#ef4444" : "#22c55e"}>{Math.round(proj.pct)}% projected by {endLabel}</text> : null
+}
+
 function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
   log("UsageSidebar: rendering! session_id:", props.session_id)
   const githubToken = process.env.GITHUB_TOKEN ?? ""
@@ -546,6 +561,7 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
                   <text fg="#ffffff">
                     {(quotaInfo()!.entitlement - quotaInfo()!.remaining).toLocaleString()} / {quotaInfo()!.entitlement.toLocaleString()} {getQuotaLabel(quotaInfo()!)}
                   </text>
+                  {renderProjectionLine(usagePercentage(), muted)}
                 </box>
               ) : !quotaInfo() && quotaLoading() ? (
                 <text fg="#888888">Loading...</text>
@@ -590,6 +606,7 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
                     <text fg={getUsageColor(goQuota()!.monthly?.usagePercent ?? 0)}>
                       {buildProgressBar(goQuota()!.monthly?.usagePercent ?? 0)}
                     </text>
+                    {renderProjectionLine(goQuota()!.monthly?.usagePercent ?? 0, muted)}
                   </box>
                 )
               ) : (

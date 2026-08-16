@@ -67,3 +67,26 @@ export function computeMinOffsets(earliestMs: number | null, now: Date): { minMo
 
   return { minMonthOffset, minWeekOffset, minDayOffset }
 }
+
+/** UTC number of days in a month. Defaults to the current UTC month; leap-year safe. */
+export function getDaysInMonth(year?: number, month?: number): number {
+  const now = new Date()
+  const y = year ?? now.getUTCFullYear()
+  const m = month ?? now.getUTCMonth()
+  const lastDay = new Date(Date.UTC(y, m + 1, 0))
+  return Math.round((lastDay.getTime() - Date.UTC(y, m, 0)) / MS_PER_DAY)
+}
+
+/** 1-based UTC day of month. Defaults to the current date. */
+export function getDayOfMonth(now?: Date): number {
+  return (now ?? new Date()).getUTCDate()
+}
+
+/** Last day of the current UTC month formatted as short-month + day, e.g. "Aug 31". */
+export function getMonthEndLabel(now?: Date): string {
+  const d = now ?? new Date()
+  const y = d.getUTCFullYear()
+  const m = d.getUTCMonth()
+  const lastDay = new Date(Date.UTC(y, m + 1, 0))
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).format(lastDay)
+}

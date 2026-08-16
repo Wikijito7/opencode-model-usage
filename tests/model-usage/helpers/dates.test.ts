@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { computeMinOffsets, getWeekMonday, getWeekInfo } from "@model-usage/helpers/dates"
+import { computeMinOffsets, getWeekMonday, getWeekInfo, getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "@model-usage/helpers/dates"
 import { formatPercentDiff } from "@model-usage/helpers/format"
 
 describe("getWeekMonday", () => {
@@ -174,5 +174,59 @@ describe("formatPercentDiff", () => {
 
   it("current=0, previous=100 → -100%", () => {
     expect(formatPercentDiff(0, 100)).toEqual({ arrow: "▼", text: "-100%" })
+  })
+})
+
+// ─── getDaysInMonth ───────────────────────────────────────────────────────────
+
+describe("getDaysInMonth", () => {
+  it("Feb 2026 → 28 days", () => {
+    expect(getDaysInMonth(2026, 1)).toBe(28)
+  })
+
+  it("Feb 2024 (leap year) → 29 days", () => {
+    expect(getDaysInMonth(2024, 1)).toBe(29)
+  })
+
+  it("Aug 2026 → 31 days", () => {
+    expect(getDaysInMonth(2026, 7)).toBe(31)
+  })
+
+  it("Apr 2026 → 30 days", () => {
+    expect(getDaysInMonth(2026, 3)).toBe(30)
+  })
+
+  it("defaults to the current UTC month and returns 28–31 days", () => {
+    const result = getDaysInMonth()
+    expect(result).toBeGreaterThanOrEqual(28)
+    expect(result).toBeLessThanOrEqual(31)
+  })
+})
+
+// ─── getDayOfMonth ────────────────────────────────────────────────────────────
+
+describe("getDayOfMonth", () => {
+  it("returns the 1-based UTC day of month (mid-month)", () => {
+    expect(getDayOfMonth(new Date(Date.UTC(2026, 7, 15)))).toBe(15)
+  })
+
+  it("returns 1 for the first day of the month", () => {
+    expect(getDayOfMonth(new Date(Date.UTC(2026, 7, 1)))).toBe(1)
+  })
+})
+
+// ─── getMonthEndLabel ─────────────────────────────────────────────────────────
+
+describe("getMonthEndLabel", () => {
+  it('formats the last day of a 31-day month (Aug 2026 → "Aug 31")', () => {
+    expect(getMonthEndLabel(new Date(Date.UTC(2026, 7, 15)))).toBe("Aug 31")
+  })
+
+  it('formats the last day of a 31-day month (Jan 2026 → "Jan 31")', () => {
+    expect(getMonthEndLabel(new Date(Date.UTC(2026, 0, 10)))).toBe("Jan 31")
+  })
+
+  it('formats the last day of a leap-year February (Feb 2024 → "Feb 29")', () => {
+    expect(getMonthEndLabel(new Date(Date.UTC(2024, 1, 10)))).toBe("Feb 29")
   })
 })

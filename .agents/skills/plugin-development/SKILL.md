@@ -41,10 +41,7 @@ description: "CRITICAL: Load when touching entry points, hooks, commands, or dia
 
 ## Deployment (verify after changes)
 
-```bash
-cp model-usage-server.ts model-usage.tsx ~/.config/opencode/plugins/
-cp -r model-usage/ ~/.config/opencode/plugins/model-usage/   # ships wlib/
-```
+Sync to the live plugins folder using the `deploy` skill (cp entry points + rsync mirror with exclusions + runtime-artifact preservation). Do NOT use raw `cp -r` — it ships test files and can clobber `.usage-cache.json`.
 
 - Restart opencode to load changes (plugins load at startup).
 - Keep the deployed copy in sync with the repo — flag drift in the quality-check report.
