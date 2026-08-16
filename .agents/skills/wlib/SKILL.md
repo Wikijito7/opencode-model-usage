@@ -4,7 +4,7 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 ---
 
 ## When to use me
-- When you need scroll, keys, theme, logging, clipboard, reload guards, dialogs, or system snapshots
+- When you need scroll, keys, theme, logging, clipboard, reload guards, dialogs, or system snapshots, or export serializers / the export overlay
 - When importing from `model-usage/wlib/`
 - When bumping the submodule or syncing the deployed copy
 
@@ -27,6 +27,17 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 | `clipboard` | `writeClipboard` (+ candidate resolution, OSC 52) |
 | `command` | `registerSlashCommand` |
 | `dialog` | `useDialogSizing`, `DialogShell` (entry is `dialog.tsx`; pure math in `dialog-fit.ts`) |
+| `export` | `buildMarkdown` / `buildCsv` / `buildJson` / `buildText` + `buildExport` (turn usage data into Markdown/CSV/JSON/plain text), `EXPORT_FORMATS`, and the `ExportData`/`ExportRow`/`ExportPeriod`/`ExportProjection`/`ExportPeriodStats`/`ExportTrends` types |
+| `export-overlay` | `ExportOverlay` (presentational format-picker popup) |
+
+## Export schema (reference)
+
+The `export` module serializes a single `ExportData` into four formats:
+- `ExportData`: `period` (start/end/granularity), `rows`, `sortMode` (`tokens`|`cost`|`price`), `totalInput`/`totalOutput`/`totalTokens`/`totalCost`, `projection`, `periodStats` (`{ sessions, messages }`), `trends` (`{ values, labels, peakWeekday }`).
+- `ExportRow` (per model): `provider`, `model`, `input`, `output`, `totalTokens`, `sharePct`, `cost`, `costPerMillion`.
+- Formats: Markdown (metadata line + table + optional `On pace`/`Trends` sections), CSV (flat model table + a totals row), JSON (structured), plain text (human dump).
+- Rounding: `cost`/`costPerMillion` → 2 decimals; `sharePct` → ≤2 decimals.
+- The source of truth is `export.ts` + `export.test.ts` (pure, unit-tested).
 
 ## Import rules (MUST)
 
@@ -43,7 +54,7 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 
 ## Blockers (MUST NOT)
 
-- Duplicating wlib functionality locally (scroll/keys/theme/log/reload/clipboard/dialog/system) — the old `shared/` folder is gone for a reason
+- Duplicating wlib functionality locally (scroll/keys/theme/log/reload/clipboard/dialog/system/export/export-overlay) — the old `shared/` folder is gone for a reason
 - Re-export patterns from wlib modules
 - Committing a submodule bump without the deployed copy in sync
 

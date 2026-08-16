@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { projectBurnRate, MIN_ELAPSED_DAYS } from "@model-usage/helpers/projection"
+import { projectBurnRate, resolveProjection, MIN_ELAPSED_DAYS } from "@model-usage/helpers/projection"
 
 // ─── projectBurnRate ──────────────────────────────────────────────────────────
 
@@ -78,5 +78,65 @@ describe("projectBurnRate", () => {
 
   it("MIN_ELAPSED_DAYS equals 3", () => {
     expect(MIN_ELAPSED_DAYS).toBe(3)
+  })
+})
+
+// ─── resolveProjection ────────────────────────────────────────────────────────
+
+describe("resolveProjection", () => {
+  it("returns none when isCurrentMonth is false", () => {
+    const result = resolveProjection(10, false, 10, 31)
+    expect(result).toEqual({ kind: "none" })
+  })
+
+  it("returns none when totalCost is 0", () => {
+    const result = resolveProjection(0, true, 10, 31)
+    expect(result).toEqual({ kind: "none" })
+  })
+
+  it("returns none when totalCost is negative", () => {
+    const result = resolveProjection(-5, true, 10, 31)
+    expect(result).toEqual({ kind: "none" })
+  })
+
+  it("returns calculating with daysLeft before MIN_ELAPSED_DAYS", () => {
+    // elapsedDays = 1, MIN_ELAPSED_DAYS = 3 → daysLeft = 2
+    const result = resolveProjection(10, true, 1, 31)
+    expect(result).toEqual({ kind: "calculating", daysLeft: 2 })
+  })
+
+  it("returns calculating with daysLeft of 3 on day 0", () => {
+    const result = resolveProjection(10, true, 0, 31)
+    expect(result).toEqual({ kind: "calculating", daysLeft: 3 })
+  })
+
+  it("returns projected at or after MIN_ELAPSED_DAYS", () => {
+    // 10 / 10 * 31 = 31
+    const result = resolveProjection(10, true, 10, 31)
+    expect(result).toEqual({
+      kind: "projected",
+      projection: { projectedCost: 31, elapsedDays: 10, totalDays: 31 },
+    })
+  })
+
+  it("projects from the exact MIN_ELAPSED_DAYS boundary", () => {
+    // 10 / 3 * 31 = 103.33…
+    const result = resolveProjection(10, true, 3, 31)
+    expect(result.kind).toBe("projected")
+    if (result.kind === "projected") {
+      expect(result.projection.projectedCost).toBeCloseTo(103.333333, 5)
+      expect(result.projection.elapsedDays).toBe(3)
+      expect(result.projection.totalDays).toBe(31)
+    }
+  })
+
+  it("returns none when projectBurnRate returns null (totalDays 0)", () => {
+    const result = resolveProjection(10, true, 10, 0)
+    expect(result).toEqual({ kind: "none" })
+  })
+
+  it("returns none when projectBurnRate returns null (NaN totalDays)", () => {
+    const result = resolveProjection(10, true, 10, NaN)
+    expect(result).toEqual({ kind: "none" })
   })
 })

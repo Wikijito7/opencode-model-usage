@@ -25,3 +25,27 @@ export function projectBurnRate(
   const projected = Math.max(0, (used / elapsedDays) * totalDays)
   return { projected, pct: projected }
 }
+
+export type ProjectionState =
+  | { kind: "none" }
+  | { kind: "calculating"; daysLeft: number }
+  | { kind: "projected"; projection: { projectedCost: number; elapsedDays: number; totalDays: number } }
+
+/**
+ * Pure projection resolver: given the current-month cost and the elapsed/total
+ * day counts, return whether a projection is unavailable ("none"), still
+ * warming up ("calculating"), or ready ("projected").
+ */
+export function resolveProjection(
+  totalCost: number,
+  isCurrentMonth: boolean,
+  elapsedDays: number,
+  totalDays: number,
+): ProjectionState {
+  if (!isCurrentMonth || totalCost <= 0) return { kind: "none" }
+  if (elapsedDays < MIN_ELAPSED_DAYS) return { kind: "calculating", daysLeft: MIN_ELAPSED_DAYS - elapsedDays }
+  const proj = projectBurnRate(totalCost, elapsedDays, totalDays)
+  return proj
+    ? { kind: "projected", projection: { projectedCost: proj.projected, elapsedDays, totalDays } }
+    : { kind: "none" }
+}

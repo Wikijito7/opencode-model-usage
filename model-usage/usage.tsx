@@ -6,7 +6,7 @@ import { Database } from "bun:sqlite"
 
 import { onMount, onCleanup, createSignal, createEffect, createMemo } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets, getDaysInMonth, getDayOfMonth } from "./helpers/dates"
-import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
+import { resolveProjection } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
@@ -16,6 +16,10 @@ import { makeScrollState } from "./wlib/scroll"
 import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
 import { buildHelpRows } from "./wlib/help"
 import { HelpOverlay } from "./wlib/help-overlay"
+import { ExportOverlay } from "./wlib/export-overlay"
+import { buildExport, EXPORT_FORMATS, type ExportPeriod } from "./wlib/export"
+import { buildExportData } from "./helpers/usage-export"
+import { writeClipboard } from "./wlib/clipboard"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
@@ -36,7 +40,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const dbPath = `${homedir()}/.local/share/opencode/opencode.db`
           const now = new Date()
 
-          const { fg, muted, red, panel } = resolveThemeColors(api.theme.current)
+          const { fg, muted, red, panel, primary, selectedText } = resolveThemeColors(api.theme.current)
 
           if (!existsSync(dbPath)) {
             api.ui.dialog.replace(() => {
@@ -84,18 +88,20 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [periodStats, setPeriodStats] = createSignal<PeriodStats | null>(null)
           const [showTrends, setShowTrends] = createSignal(false)
           const [showHelp, setShowHelp] = createSignal(false)
+          const [showExport, setShowExport] = createSignal(false)
+          const [exportSel, setExportSel] = createSignal(0)
+          const [copiedFlash, setCopiedFlash] = createSignal(false)
+          const COPIED_FLASH_MS = 2000
+          let copiedTimeout: ReturnType<typeof setTimeout> | null = null
+          const fetchDailyTotals = (s: number, e: number) => {
+            if (!db) return []
+            const r = queryDailyTotals(db, s, e)
+            return "error" in r ? [] : r
+          }
+          const computeTrends = () => computeTrendSeries(granularity(), Date.now(), getMonthCache, fetchDailyTotals)
           const trendSeries = createMemo(() => {
             if (!showTrends()) return null
-            return computeTrendSeries(
-              granularity(),
-              Date.now(),
-              getMonthCache,
-              (s, e) => {
-                if (!db) return []
-                const r = queryDailyTotals(db, s, e)
-                return "error" in r ? [] : r
-              },
-            )
+            return computeTrends()
           })
           const scroll = makeScrollState(createSignal)
 
@@ -344,6 +350,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             { key: "m",        cmd: "usage.toggleMode",  desc: "Mode" },
             { key: "o",        cmd: "usage.toggleSort",  desc: "Sort" },
             { key: "g",        cmd: "usage.trends",      desc: "Trends" },
+            { key: "e",        cmd: "usage.export",      desc: "Export" },
             { key: "h",        cmd: "usage.help",        desc: "Help" },
             { key: "escape",   cmd: "usage.escape",      desc: "Close" },
             { key: "up",       cmd: "usage.scrollUp",    desc: "Scroll up" },
@@ -352,7 +359,59 @@ export function registerUsageCommand(api: TuiPluginApi) {
             { key: "pagedown", cmd: "usage.pageDown",    desc: "Page down" },
           ]
 
+          async function runExport() {
+            const data = viewState()
+            if (typeof data !== "object" || data === null) return
+            const { models } = data
+            const currentSort = sortKey()
+            const sortedModels = sortModels(models, currentSort)
+            const { startMs, endMs } = computeWindow()
+            const period: ExportPeriod = {
+              start: new Date(startMs).toISOString().slice(0, 10),
+              end: new Date(endMs - 1).toISOString().slice(0, 10),
+              granularity: granularity(),
+            }
+            const state = resolveProjection(data.totalCost, granularity() === "month" && monthOffset() === 0, getDayOfMonth(), getDaysInMonth())
+            const projection = state.kind === "projected" ? state.projection : null
+            const exportData = buildExportData(data, sortedModels, period, currentSort, projection, periodStats(), computeTrends())
+            const text = buildExport(EXPORT_FORMATS[exportSel()].id, exportData)
+            const success = await writeClipboard(text)
+            if (success) {
+              if (copiedTimeout) {
+                clearTimeout(copiedTimeout)
+              }
+              setCopiedFlash(true)
+              copiedTimeout = setTimeout(() => {
+                setCopiedFlash(false)
+                copiedTimeout = null
+              }, COPIED_FLASH_MS)
+              setShowExport(false)
+            }
+          }
+
           function handleKey(key: string) {
+            if (showExport()) {
+              if (key === "up") {
+                setExportSel((i) => (i - 1 + EXPORT_FORMATS.length) % EXPORT_FORMATS.length)
+                return true
+              }
+              if (key === "down") {
+                setExportSel((i) => (i + 1) % EXPORT_FORMATS.length)
+                return true
+              }
+              if (key === "enter") {
+                void runExport()
+                return true
+              }
+              if (key === "escape") {
+                setShowExport(false)
+                return true
+              }
+              if (key === "e") {
+                setShowExport(false)
+                return true
+              }
+            }
             if (showHelp()) {
               if (key === "h" || key === "escape") {
                 setShowHelp(false)
@@ -365,6 +424,11 @@ export function registerUsageCommand(api: TuiPluginApi) {
             }
             if (key === "h") {
               setShowHelp(v => !v)
+              return true
+            }
+            if (key === "e") {
+              setExportSel(0)
+              setShowExport(true)
               return true
             }
             if (key === "escape") {
@@ -527,6 +591,37 @@ export function registerUsageCommand(api: TuiPluginApi) {
               arrows = " \u2190 \u2192"
             }
 
+            // Higher-priority key layer active ONLY while the export overlay is
+            // open. Binds up/down/enter/escape/e so they reach handleKey's
+            // export interception without leaking an "enter" row into help.
+            createEffect(() => {
+              if (!showExport()) return
+              let cleanupExportLayer: (() => void) | null = null
+              cleanupExportLayer = registerDialogKeyLayer(api, {
+                priority: 2,
+                bindings: [
+                  { key: "up",     cmd: "usage.exportUp",      desc: "Previous format" },
+                  { key: "down",   cmd: "usage.exportDown",    desc: "Next format" },
+                  { key: "enter",  cmd: "usage.exportConfirm", desc: "Copy" },
+                  { key: "escape", cmd: "usage.exportCancel",  desc: "Cancel" },
+                  { key: "e",      cmd: "usage.exportToggle",  desc: "Close" },
+                ],
+                commands: [
+                  { name: "usage.exportUp",      title: "Previous format", run: async () => { handleKey("up") } },
+                  { name: "usage.exportDown",    title: "Next format",     run: async () => { handleKey("down") } },
+                  { name: "usage.exportConfirm", title: "Copy",            run: async () => { handleKey("enter") } },
+                  { name: "usage.exportCancel",  title: "Cancel",          run: async () => { handleKey("escape") } },
+                  { name: "usage.exportToggle",  title: "Close",           run: async () => { handleKey("e") } },
+                ],
+              })
+              onCleanup(() => {
+                if (cleanupExportLayer) {
+                  try { cleanupExportLayer() } catch { /* ignore */ }
+                  cleanupExportLayer = null
+                }
+              })
+            })
+
             onMount(() => {
               cleanupKeyLayer = registerDialogKeyLayer(api, {
                 priority: 1,
@@ -538,7 +633,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   { name: "usage.today",       title: "Today",          run: async () => { handleKey("t") } },
                   { name: "usage.toggleMode",  title: "Toggle Mode",    run: async () => { handleKey("m") } },
                   { name: "usage.toggleSort",  title: "Toggle Sort",    run: async () => { handleKey("o") } },
-                  { name: "usage.trends",      title: "Toggle Trends",  run: async () => { handleKey("g") } },
+                  { name: "usage.trends",      title: "Toggle Trends",    run: async () => { handleKey("g") } },
+                  { name: "usage.export",      title: "Export",         run: async () => { handleKey("e") } },
                   { name: "usage.help",        title: "Toggle Help",    run: async () => { handleKey("h") } },
                   { name: "usage.escape",      title: "Close",          run: async () => { handleKey("escape") } },
                   { name: "usage.scrollUp",    title: "Scroll Up",      run: async () => { handleKey("up") } },
@@ -566,6 +662,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
               if (cleanupKeyLayer) {
                 try { cleanupKeyLayer() } catch { /* ignore */ }
                 cleanupKeyLayer = null
+              }
+              if (copiedTimeout) {
+                clearTimeout(copiedTimeout)
+                copiedTimeout = null
               }
             })
 
@@ -618,15 +718,16 @@ export function registerUsageCommand(api: TuiPluginApi) {
                           })()}</text>
                           <text fg={muted}>  {"\u2191"} Input:  {fmt(totalInput)} tokens</text>
                           <text fg={muted}>  {"\u2193"} Output: {fmt(totalOutput)} tokens</text>
-                          {granularity() === "month" && monthOffset() === 0 && totalCost > 0 && (() => {
-                            const elapsedDays = getDayOfMonth()
-                            const totalDays = getDaysInMonth()
-                            if (elapsedDays < MIN_ELAPSED_DAYS) {
-                              const n = MIN_ELAPSED_DAYS - elapsedDays
-                              return <text fg={muted}>  calculating projection... {n} {n === 1 ? "day" : "days"} to show</text>
+                          {(() => {
+                            const state = resolveProjection(totalCost, granularity() === "month" && monthOffset() === 0, getDayOfMonth(), getDaysInMonth())
+                            switch (state.kind) {
+                              case "calculating":
+                                return <text fg={muted}>  calculating projection... {state.daysLeft} {state.daysLeft === 1 ? "day" : "days"} to show</text>
+                              case "projected":
+                                return <text fg={muted}>  on pace: {fmtCost(state.projection.projectedCost)} by end of month</text>
+                              default:
+                                return null
                             }
-                            const proj = projectBurnRate(totalCost, elapsedDays, totalDays)
-                            return proj ? <text fg={muted}>  on pace: {fmtCost(proj.projected)} by end of month</text> : null
                           })()}
                         </>
                       )
@@ -635,7 +736,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                         const series = trendSeries()!
                         const max = Math.max(...series.values)
                         const labelPad = Math.max(0, ...series.labels.map(l => l.length))
-                        const windowDesc = gran === "month" ? "last 12 months" : gran === "week" ? "last 12 weeks" : "last 30 days"
+                        const windowDesc = `last ${series.values.length} ${gran === "month" ? "months" : gran === "week" ? "weeks" : "days"}`
                         return (
                           <box paddingBottom={1}>
                             {summary}
@@ -656,7 +757,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                               )
                             })}
                             <text> </text>
-                            {series.peakDay && <text fg={muted}>Most used on: {series.peakDay}</text>}
+                            {series.peakWeekday && <text fg={muted}>Most used on: {series.peakWeekday}</text>}
                           </box>
                         )
                       }
@@ -703,11 +804,22 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   )
                 })()}
                 {hasLoadedOnce() && (
-                  <text fg={muted}>← → {gran}  ·  ↑↓ scroll  ·  h help</text>
+                  <box flexDirection="row" gap={1}>
+                    <text fg={muted}>← → {gran}  ·  ↑↓ scroll  · </text>
+                    {copiedFlash() ? (
+                      <text fg={primary}>copied!</text>
+                    ) : (
+                      <text fg={muted}>e export</text>
+                    )}
+                    <text fg={muted}>  ·  h help</text>
+                  </box>
                 )}
               </box>
               {showHelp() && (
                 <HelpOverlay rows={buildHelpRows(usageBindings)} fg={fg} muted={muted} bg={panel} title="Usage Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
+              )}
+              {showExport() && (
+                <ExportOverlay formats={EXPORT_FORMATS} selectedIndex={exportSel()} fg={fg} muted={muted} primary={primary} bg={panel} selectedText={selectedText} />
               )}
               </>
             )
