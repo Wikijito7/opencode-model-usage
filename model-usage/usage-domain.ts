@@ -286,14 +286,14 @@ const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "
  * is the current month/week/day), and is always zero-filled so its length
  * exactly matches the requested granularity (12 for `"month"`/`"week"`, 30 for
  * `"day"`). `labels` is a parallel array with one display label per bucket
- * (also NEWEST → oldest). `peakDay` is the weekday name (e.g. `"Wednesday"`)
+ * (also NEWEST → oldest). `peakWeekday` is the weekday name (e.g. `"Wednesday"`)
  * with the highest aggregated token total across the window, or `null` when
  * there is no data (every day's total is zero).
  */
 export interface TrendSeries {
   values: number[]       // token totals per bucket, NEWEST first (index 0 = current)
   labels: string[]       // per-bucket labels, NEWEST first (parallel to values)
-  peakDay: string | null // e.g. "Wednesday", or null when no data
+  peakWeekday: string | null // e.g. "Wednesday", or null when no data
 }
 
 /**
@@ -424,14 +424,14 @@ export function computeTrendSeries(
     hasData = true
     weekdayTotals[new Date(dayMs).getUTCDay()] += tokens
   }
-  let peakDay: string | null = null
+  let peakWeekday: string | null = null
   if (hasData) {
     let peak = 0
     for (let i = 1; i < 7; i++) {
       if (weekdayTotals[i] > weekdayTotals[peak]) peak = i
     }
-    peakDay = WEEKDAY_NAMES[peak]
+    peakWeekday = WEEKDAY_NAMES[peak]
   }
 
-  return { values: buckets, labels, peakDay }
+  return { values: buckets, labels, peakWeekday }
 }

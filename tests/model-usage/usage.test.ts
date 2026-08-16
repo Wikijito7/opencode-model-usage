@@ -750,7 +750,7 @@ describe("buildHierarchy edge cases", () => {
     const result = computeTrendSeries("day", NOW, () => undefined, () => [])
     expect(result.values).toHaveLength(30)
     expect(result.values).toEqual(new Array(30).fill(0))
-    expect(result.peakDay).toBeNull()
+    expect(result.peakWeekday).toBeNull()
     // Labels parallel values and are NEWEST first (index 0 = today).
     expect(result.labels).toHaveLength(result.values.length)
     const todayMs = Math.floor(NOW / MS_PER_DAY) * MS_PER_DAY
@@ -778,7 +778,7 @@ describe("buildHierarchy edge cases", () => {
     )
   })
 
-  it("peakDay returns the weekday with the max aggregated token total (Wednesday)", () => {
+  it("peakWeekday returns the weekday with the max aggregated token total (Wednesday)", () => {
     const startMs = NOW - 30 * MS_PER_DAY
     const days: CachePeriod[] = []
     for (let i = 0; i < 30; i++) {
@@ -797,14 +797,14 @@ describe("buildHierarchy edge cases", () => {
       [julyStart, makeCachedMonth(julyStart, days.filter(d => new Date(d.startMs).getUTCMonth() === 6))],
     ])
     const result = computeTrendSeries("day", NOW, ms => cache.get(ms), () => [])
-    expect(result.peakDay).toBe("Wednesday")
+    expect(result.peakWeekday).toBe("Wednesday")
   })
 
-  it("peakDay returns null when every day total is zero", () => {
+  it("peakWeekday returns null when every day total is zero", () => {
     const result = computeTrendSeries("day", NOW, () => undefined, () => [
       { day_start: NOW - MS_PER_DAY, input_tokens: 0, output_tokens: 0, cost: 0 },
     ])
-    expect(result.peakDay).toBeNull()
+    expect(result.peakWeekday).toBeNull()
   })
 
   it("prefers cached days and does not call fetchDaily for cached months", () => {
