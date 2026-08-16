@@ -8,7 +8,7 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 - When reviewing UI/UX changes (treat the settled decisions below as closed, not roasts)
 
 ## Not intended for
-- Export data format/schema (CSV columns, JSON keys, rounding, escaping) → encoded in `wlib/export.ts` + its tests
+- Export data format/schema (CSV columns, JSON keys, rounding, escaping) → encoded in the plugin's `model-usage/helpers/export/usage.ts` + its tests
 - Module boundaries and layering → use `architecture`
 - Test writing → use `testing`
 - Plugin entry points/hooks → use `plugin-development`
@@ -43,7 +43,7 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 - Format options are FLUSH (wrapped in a gap-less `<box flexDirection="column">`, each option `paddingLeft={1} paddingRight={1}`, no vertical padding) — matching the persona-injector dialog's list spacing.
 - Interaction: `↑`/`↓` navigate, `enter` confirm (copy + close), `esc` closes the overlay ONLY (not the whole dialog), `e` toggles it.
 - Parent dialog owns `selectedIndex`/`showExport` state; while open, a temporary `priority: 2` key layer binds `enter` (never add `enter` to the help `usageBindings`).
-- Copy via `writeClipboard()` + a `copied!` flash (2s, `COPIED_FLASH_MS`); the flash replaces the `e export` footer hint.
+- Copy via `writeClipboard()` + a `copied!` flash (2s); the flash replaces the `e export` footer hint.
 
 ## Popup backdrop convention
 

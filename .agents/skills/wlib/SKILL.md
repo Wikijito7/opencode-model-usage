@@ -27,17 +27,19 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 | `clipboard` | `writeClipboard` (+ candidate resolution, OSC 52) |
 | `command` | `registerSlashCommand` |
 | `dialog` | `useDialogSizing`, `DialogShell` (entry is `dialog.tsx`; pure math in `dialog-fit.ts`) |
-| `export` | `buildMarkdown` / `buildCsv` / `buildJson` / `buildText` + `buildExport` (turn usage data into Markdown/CSV/JSON/plain text), `EXPORT_FORMATS`, and the `ExportData`/`ExportRow`/`ExportPeriod`/`ExportProjection`/`ExportPeriodStats`/`ExportTrends` types |
+| `export` | `ExportFormat`, `ExportFormatOption`, `EXPORT_FORMATS`, `Exportable` (the generic export contract) |
+| `export-controller` | `createExportController` (owns the export flow: overlay state, key handling, temp `priority: 2` `enter` layer, clipboard write, `copied!` flash signal + `onCopied` event) |
 | `export-overlay` | `ExportOverlay` (presentational format-picker popup) |
+| `copied-flash` | `CopiedFlash` (presentational `hint` ↔ `copied!` toggler) |
 
-## Export schema (reference)
+## Export foundation (reference)
 
-The `export` module serializes a single `ExportData` into four formats:
-- `ExportData`: `period` (start/end/granularity), `rows`, `sortMode` (`tokens`|`cost`|`price`), `totalInput`/`totalOutput`/`totalTokens`/`totalCost`, `projection`, `periodStats` (`{ sessions, messages }`), `trends` (`{ values, labels, peakWeekday }`).
-- `ExportRow` (per model): `provider`, `model`, `input`, `output`, `totalTokens`, `sharePct`, `cost`, `costPerMillion`.
-- Formats: Markdown (metadata line + table + optional `On pace`/`Trends` sections), CSV (flat model table + a totals row), JSON (structured), plain text (human dump).
-- Rounding: `cost`/`costPerMillion` → 2 decimals; `sharePct` → ≤2 decimals.
-- The source of truth is `export.ts` + `export.test.ts` (pure, unit-tested).
+The `export` module is the generic export CONTRACT, not any feature's serializers:
+- `Exportable { formats: ExportFormatOption[]; build(format: ExportFormat): string }` — the interface each feature implements.
+- `createExportController(api, exportable)` — the reusable controller that owns overlay state, key handling, the temporary `priority: 2` `enter` layer, clipboard write, and the `copied!` flash (`copiedFlash()` signal + `onCopied(listener)` event).
+- `EXPORT_FORMATS` — the canonical four formats (Markdown/CSV/JSON/plain text).
+
+Feature-specific serializers (usage, analyze, …) live in the consuming plugin, not here — e.g. `opencode-model-usage/model-usage/helpers/export/usage.ts`.
 
 ## Import rules (MUST)
 
