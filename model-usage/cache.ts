@@ -165,6 +165,22 @@ export function getMonthCache(startMs: number): CachePeriod | undefined {
   return usageCache.months[String(startMs)]
 }
 
+export function getCachedMonths(): Record<string, CachePeriod> {
+  return { ...usageCache.months }
+}
+
+/** Months whose session/message counts are still null or undefined (e.g. after a v4→v5 migration, or absent in v2/v3). */
+export function findNullCountMonths(months: Record<string, CachePeriod>): CachePeriod[] {
+  const result: CachePeriod[] = []
+  for (const key of Object.keys(months)) {
+    const month = months[key]
+    if (month && (month.sessionCount == null || month.messageCount == null)) {
+      result.push(month)
+    }
+  }
+  return result
+}
+
 export function getPrevMonthStartMs(ms: number): number {
   const d = new Date(ms)
   let m = d.getUTCMonth() - 1

@@ -10,7 +10,7 @@ import { resolveProjection } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, MAX_MODELS, fetchRootSessionTimestamps, type PeriodStats } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, type PeriodStats } from "./db"
 import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/scroll"
 import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
@@ -23,8 +23,8 @@ import { buildExport, buildExportData, type ExportPeriod } from "./helpers/expor
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
-import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs } from "./cache"
-import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
+import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs, getCachedMonths, findNullCountMonths } from "./cache"
+import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
 export function registerUsageCommand(api: TuiPluginApi) {
@@ -159,6 +159,17 @@ export function registerUsageCommand(api: TuiPluginApi) {
           }
 
           // ── Shared background pipeline (hierarchy build + forward prefetch) ──
+          function buildAndCacheMonth(monthStart: number, monthEnd: number): boolean {
+            if (!db) return false
+            const rowsResult = fetchRawRows(db, monthStart, monthEnd)
+            if ("error" in rowsResult) return false
+            const sessResult = fetchRootSessionTimestamps(db, monthStart, monthEnd)
+            const sessionTimes = "error" in sessResult ? [] : sessResult
+            const period = buildHierarchy(rowsResult, sessionTimes, monthStart, monthEnd)
+            updateMonthCache(period)
+            return true
+          }
+
           function scheduleHierarchyBuild(startMs: number, endMs: number, gran: Granularity) {
             const d = new Date(startMs)
             const monthStart = gran === "month" ? startMs : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
@@ -166,18 +177,26 @@ export function registerUsageCommand(api: TuiPluginApi) {
             if (buildingMonths.has(monthStart)) return
             buildingMonths.add(monthStart)
             setTimeout(() => {
-              buildingMonths.delete(monthStart)
-              if (cleanedUp || !db) return
-              const rowsResult = fetchRawRows(db, monthStart, monthEnd)
-              if (!("error" in rowsResult)) {
-                const sessResult = fetchRootSessionTimestamps(db, monthStart, monthEnd)
-                const sessionTimes = "error" in sessResult ? [] : sessResult
-                const period = buildHierarchy(rowsResult, sessionTimes, monthStart, monthEnd)
-                updateMonthCache(period)
-                const current = computeWindow()
-                setPeriodStats(resolvePeriodStats(current.startMs, granularity()))
+              if (cleanedUp || !db) {
+                buildingMonths.delete(monthStart)
+                return
+              }
+              try {
+                if (buildAndCacheMonth(monthStart, monthEnd)) {
+                  const current = computeWindow()
+                  setPeriodStats(resolvePeriodStats(current.startMs, granularity()))
+                }
+              } finally {
+                buildingMonths.delete(monthStart)
               }
             }, 0)
+          }
+
+          function backfillNullCounts() {
+            if (!db) return
+            for (const month of findNullCountMonths(getCachedMonths())) {
+              scheduleHierarchyBuild(month.startMs, month.endMs, "month")
+            }
           }
 
           function schedulePrefetch(startMs: number, endMs: number) {
@@ -596,6 +615,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   setMinDayOffset(off.minDayOffset)
                   setCachedEarliestTs(earliestMs)
                 }
+                backfillNullCounts()
               }, 0)
             })
             onCleanup(() => {

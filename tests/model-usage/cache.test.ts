@@ -8,6 +8,8 @@ import {
   getCachedEarliestTs,
   setCachedEarliestTs,
   flushDiskSave,
+  findNullCountMonths,
+  type CachePeriod,
 } from "@model-usage/cache"
 
 // ─── Disk-write isolation ──────────────────────────────────────────────────────
@@ -300,5 +302,116 @@ describe("getCachedEarliestTs / setCachedEarliestTs", () => {
     expect(writeSpy).toHaveBeenCalledTimes(1)
 
     setTimeoutSpy.mockRestore()
+  })
+})
+
+// ─── Suite 5: findNullCountMonths ────────────────────────────────────────────
+
+describe("findNullCountMonths", () => {
+  /** Build a minimal, fully-populated CachePeriod fixture. */
+  function makePeriod(overrides: Partial<CachePeriod> = {}): CachePeriod {
+    return {
+      startMs: 1_000_000,
+      endMs: 2_000_000,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalCost: 0,
+      messageCount: 100,
+      sessionCount: 50,
+      change: 0,
+      lastUpdated: 0,
+      weeks: null,
+      days: null,
+      models: null,
+      ...overrides,
+    }
+  }
+
+  it("returns months where sessionCount is null even if messageCount is set", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, sessionCount: null, messageCount: 42 }),
+      "2025-02": makePeriod({ startMs: 200, sessionCount: null, messageCount: 7 }),
+      "2025-03": makePeriod({ startMs: 300, sessionCount: 10, messageCount: 20 }),
+    }
+
+    const result = findNullCountMonths(months)
+
+    expect(result.map((m) => m.startMs)).toEqual([100, 200])
+  })
+
+  it("returns months where messageCount is null even if sessionCount is set", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, messageCount: null, sessionCount: 3 }),
+      "2025-02": makePeriod({ startMs: 200, messageCount: null, sessionCount: 9 }),
+      "2025-03": makePeriod({ startMs: 300, messageCount: 5, sessionCount: 6 }),
+    }
+
+    const result = findNullCountMonths(months)
+
+    expect(result.map((m) => m.startMs)).toEqual([100, 200])
+  })
+
+  it("skips months where both counts are populated", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, messageCount: 10, sessionCount: 2 }),
+      "2025-02": makePeriod({ startMs: 200, messageCount: 0, sessionCount: 0 }),
+      "2025-03": makePeriod({ startMs: 300, messageCount: 15, sessionCount: 4 }),
+    }
+
+    const result = findNullCountMonths(months)
+
+    expect(result).toEqual([])
+  })
+
+  it("returns [] for an empty record", () => {
+    expect(findNullCountMonths({})).toEqual([])
+  })
+
+  it("returns [] when all months are complete", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, messageCount: 10, sessionCount: 2 }),
+      "2025-02": makePeriod({ startMs: 200, messageCount: 8, sessionCount: 1 }),
+      "2025-03": makePeriod({ startMs: 300, messageCount: 0, sessionCount: 0 }),
+    }
+
+    expect(findNullCountMonths(months)).toEqual([])
+  })
+
+  it("returns a month where BOTH sessionCount and messageCount are null", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, sessionCount: null, messageCount: null }),
+    }
+
+    const result = findNullCountMonths(months)
+
+    expect(result.map((m) => m.startMs)).toEqual([100])
+  })
+
+  it("returns months where sessionCount and/or messageCount is undefined", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, sessionCount: undefined }),
+      "2025-02": makePeriod({ startMs: 200, messageCount: undefined }),
+      "2025-03": makePeriod({ startMs: 300, sessionCount: undefined, messageCount: undefined }),
+      "2025-04": makePeriod({ startMs: 400, messageCount: 10, sessionCount: 2 }),
+    }
+
+    const result = findNullCountMonths(months)
+
+    expect(result.map((m) => m.startMs)).toEqual([100, 200, 300])
+  })
+
+  it("does not mutate the input months record", () => {
+    const months = {
+      "2025-01": makePeriod({ startMs: 100, sessionCount: null, messageCount: 42 }),
+      "2025-02": makePeriod({ startMs: 200, messageCount: null, sessionCount: 3 }),
+      "2025-03": makePeriod({ startMs: 300, messageCount: 10, sessionCount: 2 }),
+    }
+    const keyCount = Object.keys(months).length
+    const before = JSON.parse(JSON.stringify(months)) as Record<string, CachePeriod>
+
+    findNullCountMonths(months)
+
+    expect(Object.keys(months).length).toBe(keyCount)
+    expect(months).toEqual(before)
   })
 })
