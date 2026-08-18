@@ -9,12 +9,19 @@ import { computeModelsTabLayout } from "./helpers/model-tab"
 import type { ModelStat } from "./helpers/models"
 import { calcCacheHitRate } from "./helpers/cost"
 import { makeScrollState } from "./wlib/scroll"
-import { registerDialogKeyLayer } from "./wlib/keys"
+import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
 import { createLoadGuard } from "./wlib/reload"
 import type { SessionMessagesResponse } from "@opencode-ai/sdk/v2"
 import { loadSystemSnapshot, loadBaselineTokens, loadFinalSystemOverride, analyzeSessionMessages, type AnalysisData, type CategoryEntry, type Category, type FormattedHotspotResult } from "./analyze-domain"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
+import { buildHelpRows } from "./wlib/help"
+import { HelpOverlay } from "./wlib/help-overlay"
+import { type Exportable } from "./wlib/export"
+import { createExportController, type ExportController } from "./wlib/export-controller"
+import { CopiedFlash } from "./wlib/copied-flash"
+import { buildAnalyzeExport, buildAnalyzeExportData, ANALYZE_EXPORT_FORMATS } from "./helpers/export/analyze"
+import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
 export function registerAnalyzeCommand(api: TuiPluginApi) {
   api.keymap.registerLayer({
@@ -53,7 +60,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           }
 
           // ── Derived values ───────────────────────────────────────────────
-          const { fg, muted, red, primary, selectedText } = resolveThemeColors(api.theme.current)
+          const { fg, muted, red, primary, selectedText, panel } = resolveThemeColors(api.theme.current)
           const BAR_WIDTH = 50
           const sidDisplay = currentSessionID.length > 8
             ? currentSessionID.slice(0, 8) + "…"
@@ -78,6 +85,9 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
           const [hotspotResults, setHotspotResults] = createSignal<FormattedHotspotResult[]>([])
           const [expandedHotspotIndex, setExpandedHotspotIndex] = createSignal<number | null>(null)
           const [copiedFlash, setCopiedFlash] = createSignal<boolean>(false)
+          const [toolDefsTokens, setToolDefsTokens] = createSignal<number>(0)
+          const [syntheticTokens, setSyntheticTokens] = createSignal<number>(0)
+          const [showHelp, setShowHelp] = createSignal(false)
 
           let pollInterval: any = null
           let cleanupKeyLayer: (() => void) | null = null
@@ -120,18 +130,57 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             setTimeout(() => scroll.checkOverflow(), 50)
           }
 
-          // ── Key handler ───────────────────────────────────────────────────
-          function handleKey(key: string) {
-            if (key === "up") {
-              return scroll.handleUp()
-            }
-            if (key === "down") {
-              return scroll.handleDown()
-            }
-            if (key === "pageup")   { scroll.handlePageUp(); return true }
-            if (key === "pagedown") { scroll.handlePageDown(); return true }
-            return false
+          // ── Export ────────────────────────────────────────────────────────
+          // The exportable reads the live analysis signals at confirm time so
+          // the clipboard copy always reflects the current dialog state.
+          const exportable: Exportable = {
+            formats: ANALYZE_EXPORT_FORMATS,
+            build: (format) => {
+              if (loading()) return ""
+              const analysis: AnalysisData = {
+                categories: categories(),
+                estimatedTotal: estimatedTotal(),
+                topContributors: topContributors(),
+                hasToolsSection: hasToolsSection(),
+                messageCount: messageCount(),
+                modelStats: modelStats(),
+                switchesCount: switchesCount(),
+                compactionSummary: compactionSummary(),
+                sessionCost: sessionCost(),
+                hotspotResults: hotspotResults(),
+                rawSystemText: rawSystemText(),
+                rawToolDefsText: rawToolDefsText(),
+                toolDefsTokens: toolDefsTokens(),
+                syntheticTokens: syntheticTokens(),
+              }
+              return buildAnalyzeExport(format, buildAnalyzeExportData(analysis, currentSessionID))
+            },
           }
+          let exporter: ExportController | null = null
+
+          // ── Single source of truth for dialog key bindings ────────────────
+          // Consumed by BOTH registerDialogKeyLayer and buildHelpRows (via the
+          // HelpOverlay). Tab navigation is arrow-only (left/right): the h/l
+          // aliases were removed so `h` can open help without a key conflict.
+          const analyzeBindings: KeyBinding[] = [
+            { key: "left",     cmd: "analyze.tabLeft",     desc: "Previous tab" },
+            { key: "right",    cmd: "analyze.tabRight",    desc: "Next tab" },
+            { key: "up",       cmd: "analyze.scrollUp",    desc: "Scroll up" },
+            { key: "down",     cmd: "analyze.scrollDown",  desc: "Scroll down" },
+            { key: "pageup",   cmd: "analyze.pageUp",      desc: "Page up" },
+            { key: "pagedown", cmd: "analyze.pageDown",    desc: "Page down" },
+            { key: "v",        cmd: "analyze.toggleRaw",   desc: "Raw prompt" },
+            { key: "c",        cmd: "analyze.copyRaw",     desc: "Copy raw prompt" },
+            { key: "r",        cmd: "analyze.reload",      desc: "Reload" },
+            { key: "1",        cmd: "analyze.expand1",     desc: "Expand message 1" },
+            { key: "2",        cmd: "analyze.expand2",     desc: "Expand message 2" },
+            { key: "3",        cmd: "analyze.expand3",     desc: "Expand message 3" },
+            { key: "4",        cmd: "analyze.expand4",     desc: "Expand message 4" },
+            { key: "5",        cmd: "analyze.expand5",     desc: "Expand message 5" },
+            { key: "e",        cmd: "analyze.export",      desc: "Export" },
+            { key: "h",        cmd: "analyze.help",        desc: "Help" },
+            { key: "escape",   cmd: "analyze.escape",      desc: "Close" },
+          ]
 
           // ── Data loader ───────────────────────────────────────────────────
           async function loadAnalysis() {
@@ -169,6 +218,8 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
               setCompactionSummary(data.compactionSummary)
               setSessionCost(data.sessionCost)
               setHotspotResults(data.hotspotResults)
+              setToolDefsTokens(data.toolDefsTokens)
+              setSyntheticTokens(data.syntheticTokens)
 
               setLoading(false)
               setTimeout(() => scroll.checkOverflow(), 50)
@@ -188,6 +239,8 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             setShowRaw(false)
             setRawSystemText("")
             setRawToolDefsText("")
+            setToolDefsTokens(0)
+            setSyntheticTokens(0)
             setLoading(true)
             // Don't clear data — keep showing the old view while fetching.
             // Mirrors /usage dialog: loading spinner only appears when there's
@@ -268,49 +321,97 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
               }
             }
 
+            // The export controller must be created inside this Solid owner so its
+            // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
+            // disposed when the dialog closes.
+            exporter = createExportController(api, exportable)
+
+            // ── Central key dispatcher ──────────────────────────────────────
+            // Single entry point for every key: routes the export overlay first,
+            // then help handling, then tabs/scroll/raw/expand/reload/close.
+            function handleKey(key: string) {
+              if (exporter?.handleKey(key)) return true
+              if (showHelp()) {
+                if (key === "h" || key === "escape") {
+                  setShowHelp(false)
+                }
+                return true
+              }
+              if (key === "e") {
+                exporter?.open()
+                return true
+              }
+              if (key === "h") {
+                setShowHelp((v) => !v)
+                return true
+              }
+              if (key === "escape") {
+                api.ui.dialog.clear()
+                return true
+              }
+              if (key === "left") {
+                switchTab(-1)
+                return true
+              }
+              if (key === "right") {
+                switchTab(1)
+                return true
+              }
+              if (key === "v") {
+                const list = tabs()
+                const idx = Math.min(activeTab(), list.length - 1)
+                const id = list[idx]?.id
+                if (id === "system" || id === "tooldefs") setShowRaw((s) => !s)
+                return true
+              }
+              if (key === "c") {
+                void copyActiveRawText()
+                return true
+              }
+              if (key === "r") {
+                reload()
+                return true
+              }
+              if (key === "1") { toggleExpand(0); return true }
+              if (key === "2") { toggleExpand(1); return true }
+              if (key === "3") { toggleExpand(2); return true }
+              if (key === "4") { toggleExpand(3); return true }
+              if (key === "5") { toggleExpand(4); return true }
+              if (key === "up") {
+                return scroll.handleUp()
+              }
+              if (key === "down") {
+                return scroll.handleDown()
+              }
+              if (key === "pageup")   { scroll.handlePageUp(); return true }
+              if (key === "pagedown") { scroll.handlePageDown(); return true }
+              return false
+            }
+
             onMount(() => {
-              // Register dialog key layer for scroll + tabs + reload
+              // Register dialog key layer — bindings come from analyzeBindings
+              // (shared with the HelpOverlay via buildHelpRows).
               cleanupKeyLayer = registerDialogKeyLayer(api, {
-                bindings: [
-                  { key: "up",   cmd: "analyze.scrollUp",   desc: "Scroll up" },
-                  { key: "k",    cmd: "analyze.scrollUp",   desc: "Scroll up" },
-                  { key: "down", cmd: "analyze.scrollDown", desc: "Scroll down" },
-                  { key: "j",    cmd: "analyze.scrollDown", desc: "Scroll down" },
-                  { key: "left",  cmd: "analyze.tabLeft",  desc: "Previous tab" },
-                  { key: "h",     cmd: "analyze.tabLeft",  desc: "Previous tab" },
-                  { key: "right", cmd: "analyze.tabRight", desc: "Next tab" },
-                  { key: "l",     cmd: "analyze.tabRight", desc: "Next tab" },
-                  { key: "v",     cmd: "analyze.toggleRaw", desc: "Raw prompt" },
-                  { key: "c",     cmd: "analyze.copyRaw",    desc: "Copy raw system prompt" },
-                  { key: "r",    cmd: "analyze.reload",     desc: "Reload" },
-                  { key: "1",    cmd: "analyze.expand1",    desc: "Toggle expand large message 1" },
-                  { key: "2",    cmd: "analyze.expand2",    desc: "Toggle expand large message 2" },
-                  { key: "3",    cmd: "analyze.expand3",    desc: "Toggle expand large message 3" },
-                  { key: "4",    cmd: "analyze.expand4",    desc: "Toggle expand large message 4" },
-                  { key: "5",    cmd: "analyze.expand5",    desc: "Toggle expand large message 5" },
-                  { key: "pageup",   cmd: "analyze.pageUp",   desc: "Page up" },
-                  { key: "pagedown", cmd: "analyze.pageDown", desc: "Page down" },
-                ],
+                priority: 1,
+                bindings: analyzeBindings,
                 commands: [
-                  { name: "analyze.scrollUp",   title: "Scroll Up",   run: async () => { handleKey("up") } },
-                  { name: "analyze.scrollDown", title: "Scroll Down", run: async () => { handleKey("down") } },
-                  { name: "analyze.tabLeft",    title: "Previous Tab", run: async () => { switchTab(-1) } },
-                  { name: "analyze.tabRight",   title: "Next Tab",     run: async () => { switchTab(1) } },
-                  { name: "analyze.toggleRaw",  title: "Raw Prompt",   run: async () => {
-                    const list = tabs()
-                    const idx = Math.min(activeTab(), list.length - 1)
-                    const id = list[idx]?.id
-                    if (id === "system" || id === "tooldefs") setShowRaw((s) => !s)
-                  } },
-                  { name: "analyze.copyRaw",    title: "Copy Raw Prompt", run: async () => { await copyActiveRawText() } },
-                  { name: "analyze.reload",     title: "Reload",      run: async () => { reload() } },
-                  { name: "analyze.expand1",    title: "Toggle Expand Message 1", run: () => { toggleExpand(0) } },
-                  { name: "analyze.expand2",    title: "Toggle Expand Message 2", run: () => { toggleExpand(1) } },
-                  { name: "analyze.expand3",    title: "Toggle Expand Message 3", run: () => { toggleExpand(2) } },
-                  { name: "analyze.expand4",    title: "Toggle Expand Message 4", run: () => { toggleExpand(3) } },
-                  { name: "analyze.expand5",    title: "Toggle Expand Message 5", run: () => { toggleExpand(4) } },
-                  { name: "analyze.pageUp",   title: "Page Up",   run: async () => { handleKey("pageup") } },
-                  { name: "analyze.pageDown", title: "Page Down", run: async () => { handleKey("pagedown") } },
+                  { name: "analyze.tabLeft",    title: "Previous Tab",     run: async () => { handleKey("left") } },
+                  { name: "analyze.tabRight",   title: "Next Tab",         run: async () => { handleKey("right") } },
+                  { name: "analyze.scrollUp",   title: "Scroll Up",        run: async () => { handleKey("up") } },
+                  { name: "analyze.scrollDown", title: "Scroll Down",      run: async () => { handleKey("down") } },
+                  { name: "analyze.pageUp",     title: "Page Up",          run: async () => { handleKey("pageup") } },
+                  { name: "analyze.pageDown",   title: "Page Down",        run: async () => { handleKey("pagedown") } },
+                  { name: "analyze.toggleRaw",  title: "Raw Prompt",       run: async () => { handleKey("v") } },
+                  { name: "analyze.copyRaw",    title: "Copy Raw Prompt",  run: async () => { handleKey("c") } },
+                  { name: "analyze.reload",     title: "Reload",           run: async () => { handleKey("r") } },
+                  { name: "analyze.expand1",    title: "Toggle Expand Message 1", run: () => { handleKey("1") } },
+                  { name: "analyze.expand2",    title: "Toggle Expand Message 2", run: () => { handleKey("2") } },
+                  { name: "analyze.expand3",    title: "Toggle Expand Message 3", run: () => { handleKey("3") } },
+                  { name: "analyze.expand4",    title: "Toggle Expand Message 4", run: () => { handleKey("4") } },
+                  { name: "analyze.expand5",    title: "Toggle Expand Message 5", run: () => { handleKey("5") } },
+                  { name: "analyze.export",     title: "Export",           run: async () => { handleKey("e") } },
+                  { name: "analyze.help",       title: "Toggle Help",      run: async () => { handleKey("h") } },
+                  { name: "analyze.escape",     title: "Close",            run: async () => { handleKey("escape") } },
                 ],
               })
 
@@ -344,6 +445,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             const safeFmt = (n: number) => (n > 0 ? fmt(n) : "0")
 
             return (
+              <>
               <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
                 {/* ── Title bar ────────────────────────────────────────── */}
                 <box flexDirection="row" justifyContent="space-between">
@@ -731,18 +833,14 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
 
                   return (
                     <box flexDirection="row" gap={1}>
-                      <text fg={muted}>← → tabs  ·  PgUp/Dn ↑↓ scroll</text>
+                      <text fg={muted}>← → tabs  ·  ↑↓ scroll</text>
                       {(isSys || isToolDefs) && (
                         <>
                           <text fg={muted}>·  v raw</text>
                           {showRaw() && (
                             <>
                               <text fg={muted}>·</text>
-                              {copiedFlash() ? (
-                                <text fg={primary}>copied!</text>
-                              ) : (
-                                <text fg={muted}>c copy</text>
-                              )}
+                              <CopiedFlash copied={copiedFlash()} hint="c copy" muted={muted} primary={primary} />
                             </>
                           )}
                         </>
@@ -751,10 +849,18 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
                         <text fg={muted}>·  1-5 expand</text>
                       )}
                       <text fg={muted}>·  r reload</text>
+                      <text fg={muted}>·</text>
+                      <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
+                      <text fg={muted}>·  h help</text>
                     </box>
                   )
                 })()}
               </box>
+              {showHelp() && (
+                <HelpOverlay rows={buildHelpRows(analyzeBindings)} fg={fg} muted={muted} bg={panel} title="Analyze Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
+              )}
+              {exporter!.renderOverlay()}
+              </>
             )
           })
         },
