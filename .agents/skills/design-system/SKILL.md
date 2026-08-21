@@ -8,7 +8,7 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 - When reviewing UI/UX changes (treat the settled decisions below as closed, not roasts)
 
 ## Not intended for
-- Export data format/schema (CSV columns, JSON keys, rounding, escaping) → encoded in `wlib/export.ts` + its tests
+- Export data format/schema (CSV columns, JSON keys, rounding, escaping) → encoded in the plugin's `model-usage/helpers/export/usage.ts` + its tests
 - Module boundaries and layering → use `architecture`
 - Test writing → use `testing`
 - Plugin entry points/hooks → use `plugin-development`
@@ -43,7 +43,7 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 - Format options are FLUSH (wrapped in a gap-less `<box flexDirection="column">`, each option `paddingLeft={1} paddingRight={1}`, no vertical padding) — matching the persona-injector dialog's list spacing.
 - Interaction: `↑`/`↓` navigate, `enter` confirm (copy + close), `esc` closes the overlay ONLY (not the whole dialog), `e` toggles it.
 - Parent dialog owns `selectedIndex`/`showExport` state; while open, a temporary `priority: 2` key layer binds `enter` (never add `enter` to the help `usageBindings`).
-- Copy via `writeClipboard()` + a `copied!` flash (2s, `COPIED_FLASH_MS`); the flash replaces the `e export` footer hint.
+- Copy via `writeClipboard()` + a `copied!` flash (2s); the flash replaces the `e export` footer hint.
 
 ## Popup backdrop convention
 
@@ -54,6 +54,14 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 
 - `← → {gran}  ·  ↑↓ scroll  ·  e export  ·  h help` — `e export` BEFORE `h help`, and help is always LAST.
 - During the flash: `← → {gran}  ·  ↑↓ scroll  ·  copied!  ·  h help`.
+
+## Analyze dialog footer / tab nav (settled)
+
+- Tab navigation is **arrow-only** (`← →`): the `h`/`l` aliases were removed so `h` can open help without a key conflict. This is a deliberate, settled choice — do not re-add `h`/`l` tab aliases.
+- Vertical scroll is **arrow-only** (`↑↓`), matching the usage dialog: the `j`/`k` aliases were removed. `PgUp`/`PgDn` remain bound and functional (registered commands `analyze.pageUp`/`analyze.pageDown`) but are **not** shown in the footer hint.
+- Footer order: `← → tabs · ↑↓ scroll [· v raw · c copy/copied!] [· 1-5 expand] · r reload · e export · h help` — `e export` before `h help`, help LAST.
+- The raw-copy flash uses the shared `CopiedFlash` component (`c copy` hint ↔ `copied!`), distinct from the exporter's flash (`e export` ↔ `copied!`).
+- `h` opens the `HelpOverlay` (rows built from `buildHelpRows(analyzeBindings)`); `e` opens the `ExportOverlay` via `createExportController`.
 
 ## Shared design language (Wokis network)
 
@@ -66,7 +74,7 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 | Dialog size | `large` (88) | `medium` (60) |
 | Root box | inlined (not `DialogShell`) | `DialogShell` |
 | Theme keys destructured | `fg, muted, red, panel, primary, selectedText` | `fg, muted, red, primary, selectedText` (no `panel`) |
-| Nav keys | arrows (analyze also `jk`) | `↑↓/jk` |
+| Nav keys | arrows (analyze tab nav is arrow-only `← →`; scroll arrow-only `↑↓` + `PgUp`/`PgDn`) | `↑↓/jk` |
 | Footer (usage vs persona) | `← → {gran} · ↑↓ scroll · e export · h help` | `↑↓/jk navigate · enter select · esc close` |
 | Overlays | `HelpOverlay` + `ExportOverlay` | none (single-list dialog) |
 

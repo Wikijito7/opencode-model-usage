@@ -10,21 +10,21 @@ import { resolveProjection } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, MAX_MODELS, fetchRootSessionTimestamps, type PeriodStats } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, type PeriodStats } from "./db"
 import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/scroll"
 import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
 import { buildHelpRows } from "./wlib/help"
 import { HelpOverlay } from "./wlib/help-overlay"
-import { ExportOverlay } from "./wlib/export-overlay"
-import { buildExport, EXPORT_FORMATS, type ExportPeriod } from "./wlib/export"
-import { buildExportData } from "./helpers/usage-export"
-import { writeClipboard } from "./wlib/clipboard"
+import { EXPORT_FORMATS, type Exportable } from "./wlib/export"
+import { createExportController, type ExportController } from "./wlib/export-controller"
+import { CopiedFlash } from "./wlib/copied-flash"
+import { buildExport, buildExportData, type ExportPeriod } from "./helpers/export/usage"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
 
-import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, scheduleDiskSave, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs } from "./cache"
-import { type Granularity, computeUsageDataFromRows, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
+import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs, getCachedMonths, findNullCountMonths } from "./cache"
+import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
 export function registerUsageCommand(api: TuiPluginApi) {
@@ -40,7 +40,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const dbPath = `${homedir()}/.local/share/opencode/opencode.db`
           const now = new Date()
 
-          const { fg, muted, red, panel, primary, selectedText } = resolveThemeColors(api.theme.current)
+          const { fg, muted, red, panel, primary } = resolveThemeColors(api.theme.current)
 
           if (!existsSync(dbPath)) {
             api.ui.dialog.replace(() => {
@@ -88,11 +88,6 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [periodStats, setPeriodStats] = createSignal<PeriodStats | null>(null)
           const [showTrends, setShowTrends] = createSignal(false)
           const [showHelp, setShowHelp] = createSignal(false)
-          const [showExport, setShowExport] = createSignal(false)
-          const [exportSel, setExportSel] = createSignal(0)
-          const [copiedFlash, setCopiedFlash] = createSignal(false)
-          const COPIED_FLASH_MS = 2000
-          let copiedTimeout: ReturnType<typeof setTimeout> | null = null
           const fetchDailyTotals = (s: number, e: number) => {
             if (!db) return []
             const r = queryDailyTotals(db, s, e)
@@ -164,6 +159,17 @@ export function registerUsageCommand(api: TuiPluginApi) {
           }
 
           // ── Shared background pipeline (hierarchy build + forward prefetch) ──
+          function buildAndCacheMonth(monthStart: number, monthEnd: number): boolean {
+            if (!db) return false
+            const rowsResult = fetchRawRows(db, monthStart, monthEnd)
+            if ("error" in rowsResult) return false
+            const sessResult = fetchRootSessionTimestamps(db, monthStart, monthEnd)
+            const sessionTimes = "error" in sessResult ? [] : sessResult
+            const period = buildHierarchy(rowsResult, sessionTimes, monthStart, monthEnd)
+            updateMonthCache(period)
+            return true
+          }
+
           function scheduleHierarchyBuild(startMs: number, endMs: number, gran: Granularity) {
             const d = new Date(startMs)
             const monthStart = gran === "month" ? startMs : Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)
@@ -171,18 +177,26 @@ export function registerUsageCommand(api: TuiPluginApi) {
             if (buildingMonths.has(monthStart)) return
             buildingMonths.add(monthStart)
             setTimeout(() => {
-              buildingMonths.delete(monthStart)
-              if (cleanedUp || !db) return
-              const rowsResult = fetchRawRows(db, monthStart, monthEnd)
-              if (!("error" in rowsResult)) {
-                const sessResult = fetchRootSessionTimestamps(db, monthStart, monthEnd)
-                const sessionTimes = "error" in sessResult ? [] : sessResult
-                const period = buildHierarchy(rowsResult, sessionTimes, monthStart, monthEnd)
-                updateMonthCache(period)
-                const current = computeWindow()
-                setPeriodStats(resolvePeriodStats(current.startMs, granularity()))
+              if (cleanedUp || !db) {
+                buildingMonths.delete(monthStart)
+                return
+              }
+              try {
+                if (buildAndCacheMonth(monthStart, monthEnd)) {
+                  const current = computeWindow()
+                  setPeriodStats(resolvePeriodStats(current.startMs, granularity()))
+                }
+              } finally {
+                buildingMonths.delete(monthStart)
               }
             }, 0)
+          }
+
+          function backfillNullCounts() {
+            if (!db) return
+            for (const month of findNullCountMonths(getCachedMonths())) {
+              scheduleHierarchyBuild(month.startMs, month.endMs, "month")
+            }
           }
 
           function schedulePrefetch(startMs: number, endMs: number) {
@@ -359,59 +373,29 @@ export function registerUsageCommand(api: TuiPluginApi) {
             { key: "pagedown", cmd: "usage.pageDown",    desc: "Page down" },
           ]
 
-          async function runExport() {
-            const data = viewState()
-            if (typeof data !== "object" || data === null) return
-            const { models } = data
-            const currentSort = sortKey()
-            const sortedModels = sortModels(models, currentSort)
-            const { startMs, endMs } = computeWindow()
-            const period: ExportPeriod = {
-              start: new Date(startMs).toISOString().slice(0, 10),
-              end: new Date(endMs - 1).toISOString().slice(0, 10),
-              granularity: granularity(),
-            }
-            const state = resolveProjection(data.totalCost, granularity() === "month" && monthOffset() === 0, getDayOfMonth(), getDaysInMonth())
-            const projection = state.kind === "projected" ? state.projection : null
-            const exportData = buildExportData(data, sortedModels, period, currentSort, projection, periodStats(), computeTrends())
-            const text = buildExport(EXPORT_FORMATS[exportSel()].id, exportData)
-            const success = await writeClipboard(text)
-            if (success) {
-              if (copiedTimeout) {
-                clearTimeout(copiedTimeout)
+          const exportable: Exportable = {
+            formats: EXPORT_FORMATS,
+            build: (format) => {
+              const data = viewState()
+              if (typeof data !== "object" || data === null) return ""
+              const currentSort = sortKey()
+              const sortedModels = sortModels(data.models, currentSort)
+              const { startMs, endMs } = computeWindow()
+              const period: ExportPeriod = {
+                start: new Date(startMs).toISOString().slice(0, 10),
+                end: new Date(endMs - 1).toISOString().slice(0, 10),
+                granularity: granularity(),
               }
-              setCopiedFlash(true)
-              copiedTimeout = setTimeout(() => {
-                setCopiedFlash(false)
-                copiedTimeout = null
-              }, COPIED_FLASH_MS)
-              setShowExport(false)
-            }
+              const state = resolveProjection(data.totalCost, granularity() === "month" && monthOffset() === 0, getDayOfMonth(), getDaysInMonth())
+              const projection = state.kind === "projected" ? state.projection : null
+              const exportData = buildExportData(data, sortedModels, period, currentSort, projection, periodStats(), computeTrends())
+              return buildExport(format, exportData)
+            },
           }
+          let exporter: ExportController | null = null
 
           function handleKey(key: string) {
-            if (showExport()) {
-              if (key === "up") {
-                setExportSel((i) => (i - 1 + EXPORT_FORMATS.length) % EXPORT_FORMATS.length)
-                return true
-              }
-              if (key === "down") {
-                setExportSel((i) => (i + 1) % EXPORT_FORMATS.length)
-                return true
-              }
-              if (key === "enter") {
-                void runExport()
-                return true
-              }
-              if (key === "escape") {
-                setShowExport(false)
-                return true
-              }
-              if (key === "e") {
-                setShowExport(false)
-                return true
-              }
-            }
+            if (exporter?.handleKey(key)) return true
             if (showHelp()) {
               if (key === "h" || key === "escape") {
                 setShowHelp(false)
@@ -427,8 +411,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
               return true
             }
             if (key === "e") {
-              setExportSel(0)
-              setShowExport(true)
+              exporter?.open()
               return true
             }
             if (key === "escape") {
@@ -549,6 +532,10 @@ export function registerUsageCommand(api: TuiPluginApi) {
           }
 
           api.ui.dialog.replace(() => {
+            // The export controller must be created inside this Solid owner so its
+            // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
+            // disposed when the dialog closes.
+            exporter = createExportController(api, exportable)
             // Desired large/40 — falls back to fit the terminal (never cut off).
             const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
             log(
@@ -591,36 +578,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
               arrows = " \u2190 \u2192"
             }
 
-            // Higher-priority key layer active ONLY while the export overlay is
-            // open. Binds up/down/enter/escape/e so they reach handleKey's
-            // export interception without leaking an "enter" row into help.
-            createEffect(() => {
-              if (!showExport()) return
-              let cleanupExportLayer: (() => void) | null = null
-              cleanupExportLayer = registerDialogKeyLayer(api, {
-                priority: 2,
-                bindings: [
-                  { key: "up",     cmd: "usage.exportUp",      desc: "Previous format" },
-                  { key: "down",   cmd: "usage.exportDown",    desc: "Next format" },
-                  { key: "enter",  cmd: "usage.exportConfirm", desc: "Copy" },
-                  { key: "escape", cmd: "usage.exportCancel",  desc: "Cancel" },
-                  { key: "e",      cmd: "usage.exportToggle",  desc: "Close" },
-                ],
-                commands: [
-                  { name: "usage.exportUp",      title: "Previous format", run: async () => { handleKey("up") } },
-                  { name: "usage.exportDown",    title: "Next format",     run: async () => { handleKey("down") } },
-                  { name: "usage.exportConfirm", title: "Copy",            run: async () => { handleKey("enter") } },
-                  { name: "usage.exportCancel",  title: "Cancel",          run: async () => { handleKey("escape") } },
-                  { name: "usage.exportToggle",  title: "Close",           run: async () => { handleKey("e") } },
-                ],
-              })
-              onCleanup(() => {
-                if (cleanupExportLayer) {
-                  try { cleanupExportLayer() } catch { /* ignore */ }
-                  cleanupExportLayer = null
-                }
-              })
-            })
+            // The export overlay's priority-2 key layer (up/down/enter/escape/e)
+            // is owned by the shared export controller now.
 
             onMount(() => {
               cleanupKeyLayer = registerDialogKeyLayer(api, {
@@ -656,16 +615,13 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   setMinDayOffset(off.minDayOffset)
                   setCachedEarliestTs(earliestMs)
                 }
+                backfillNullCounts()
               }, 0)
             })
             onCleanup(() => {
               if (cleanupKeyLayer) {
                 try { cleanupKeyLayer() } catch { /* ignore */ }
                 cleanupKeyLayer = null
-              }
-              if (copiedTimeout) {
-                clearTimeout(copiedTimeout)
-                copiedTimeout = null
               }
             })
 
@@ -806,11 +762,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                 {hasLoadedOnce() && (
                   <box flexDirection="row" gap={1}>
                     <text fg={muted}>← → {gran}  ·  ↑↓ scroll  · </text>
-                    {copiedFlash() ? (
-                      <text fg={primary}>copied!</text>
-                    ) : (
-                      <text fg={muted}>e export</text>
-                    )}
+                    <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
                     <text fg={muted}>  ·  h help</text>
                   </box>
                 )}
@@ -818,9 +770,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
               {showHelp() && (
                 <HelpOverlay rows={buildHelpRows(usageBindings)} fg={fg} muted={muted} bg={panel} title="Usage Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
               )}
-              {showExport() && (
-                <ExportOverlay formats={EXPORT_FORMATS} selectedIndex={exportSel()} fg={fg} muted={muted} primary={primary} bg={panel} selectedText={selectedText} />
-              )}
+              {exporter!.renderOverlay()}
               </>
             )
           }, () => {
