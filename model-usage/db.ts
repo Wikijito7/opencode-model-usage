@@ -18,6 +18,93 @@ export interface PeriodStats {
   messages: number
 }
 
+export interface TopSession {
+  id: string
+  title: string | null
+  cost: number
+  tokensInput: number
+  tokensOutput: number
+  tokens: number
+  subagentCount: number
+  timeCreated: number
+}
+
+/**
+ * Returns the top root sessions within the half-open range `[startMs, endMs)`,
+ * ordered by either total cost or total tokens and limited to 10.
+ *
+ * Only the `session` table is queried (no message/json_extract scans). Each row
+ * is a root session (`parent_id IS NULL`) with its subagent count computed via a
+ * correlated subquery over its children.
+ *
+ * @param dbOrPath - an already-open Database instance, or a filesystem path to
+ *   open a read-only connection (closed automatically on exit).
+ * @param startMs - inclusive start of the range as a ms-epoch.
+ * @param endMs - exclusive end of the range as a ms-epoch.
+ * @param sort - ordering key: "cost" orders by `cost DESC`, "tokens" orders by
+ *   `(tokens_input + tokens_output) DESC`.
+ * @returns `{ sessions: TopSession[] }` on success, or `{ error: string }` on
+ *   failure.
+ */
+export function queryTopSessions(
+  dbOrPath: Database | string,
+  startMs: number,
+  endMs: number,
+  sort: "cost" | "tokens",
+): { sessions: TopSession[] } | { error: string } {
+  let db: Database | null = null
+  let ownConnection = false
+  try {
+    if (typeof dbOrPath === "string") {
+      db = new Database(dbOrPath, { readonly: true })
+      ownConnection = true
+    } else {
+      db = dbOrPath
+    }
+
+    const orderBy = sort === "cost" ? "s.cost" : "(s.tokens_input + s.tokens_output)"
+
+    const rows = db
+      .query(
+        `SELECT
+           s.id,
+           s.title,
+           s.cost,
+           s.tokens_input  AS tokensInput,
+           s.tokens_output AS tokensOutput,
+           (s.tokens_input + s.tokens_output) AS tokens,
+           (SELECT COUNT(*) FROM session c WHERE c.parent_id = s.id) AS subagentCount,
+           s.time_created AS timeCreated
+         FROM session s
+         WHERE s.parent_id IS NULL
+           AND s.time_created >= ?
+           AND s.time_created < ?
+         ORDER BY ${orderBy} DESC
+         LIMIT 10`,
+      )
+      .all(startMs, endMs) as TopSession[]
+
+    const sessions: TopSession[] = (rows ?? []).map((r: TopSession) => ({
+      id: r.id,
+      title: r.title ?? null,
+      cost: r.cost ?? 0,
+      tokensInput: r.tokensInput ?? 0,
+      tokensOutput: r.tokensOutput ?? 0,
+      tokens: r.tokens ?? 0,
+      subagentCount: r.subagentCount ?? 0,
+      timeCreated: r.timeCreated,
+    }))
+
+    return { sessions }
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) }
+  } finally {
+    if (ownConnection) {
+      try { db?.close() } catch { /* ignore */ }
+    }
+  }
+}
+
 export function fetchRootSessionTimestamps(dbOrPath: Database | string, startMs: number, endMs: number): number[] | { error: string } {
   let db: Database | null = null
   let ownConnection = false

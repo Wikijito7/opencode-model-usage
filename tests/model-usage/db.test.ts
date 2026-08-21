@@ -7,7 +7,9 @@ import {
   fetchRawRows,
   fetchRootSessionTimestamps,
   queryDailyTotals,
+  queryTopSessions,
   type RawUsageRow,
+  type TopSession,
 } from "@model-usage/db"
 
 function setupDb(): { dbPath: string; cleanup: () => void } {
@@ -21,7 +23,16 @@ function setupDb(): { dbPath: string; cleanup: () => void } {
   db.run(`CREATE TABLE IF NOT EXISTS session (
     id TEXT,
     parent_id TEXT,
-    time_created INTEGER
+    time_created INTEGER,
+    title TEXT,
+    cost REAL,
+    tokens_input INTEGER,
+    tokens_output INTEGER,
+    tokens_reasoning INTEGER,
+    tokens_cache_read INTEGER,
+    tokens_cache_write INTEGER,
+    project_id TEXT,
+    time_compacting INTEGER
   )`)
   db.close()
   return { dbPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
@@ -39,14 +50,47 @@ function insertMessage(dbPath: string, timeCreated: number, data: Record<string,
   }
 }
 
-function insertSession(dbPath: string, id: string, parentId: string | null, timeCreated: number) {
+function insertSession(
+  dbPath: string,
+  id: string,
+  parentId: string | null,
+  timeCreated: number,
+  overrides: Partial<{
+    title: string
+    cost: number
+    tokensInput: number
+    tokensOutput: number
+    tokensReasoning: number
+    tokensCacheRead: number
+    tokensCacheWrite: number
+    projectId: string
+    timeCompacting: number
+  }> = {},
+) {
   const db = new Database(dbPath)
   try {
-    db.run(`INSERT INTO session (id, parent_id, time_created) VALUES (?, ?, ?)`, [
-      id,
-      parentId,
-      timeCreated,
-    ])
+    db.run(
+      `INSERT INTO session (
+        id, parent_id, time_created, title, cost,
+        tokens_input, tokens_output, tokens_reasoning,
+        tokens_cache_read, tokens_cache_write,
+        project_id, time_compacting
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        parentId,
+        timeCreated,
+        overrides.title ?? "",
+        overrides.cost ?? 0,
+        overrides.tokensInput ?? 0,
+        overrides.tokensOutput ?? 0,
+        overrides.tokensReasoning ?? 0,
+        overrides.tokensCacheRead ?? 0,
+        overrides.tokensCacheWrite ?? 0,
+        overrides.projectId ?? "",
+        overrides.timeCompacting ?? 0,
+      ],
+    )
   } finally {
     db.close()
   }
@@ -387,6 +431,128 @@ describe("queryDailyTotals", () => {
     expect(result).toHaveProperty("error")
     expect(typeof result.error).toBe("string")
     expect(result.error.length).toBeGreaterThan(0)
+  })
+})
+
+describe("queryTopSessions", () => {
+  let setup: { dbPath: string; cleanup: () => void }
+  const REFERENCE = Date.UTC(2026, 6, 6, 12, 0, 0)
+  const DAY = 86_400_000
+
+  function sessions(result: { sessions: TopSession[] } | { error: string }): TopSession[] {
+    expect(result).not.toHaveProperty("error")
+    return (result as { sessions: TopSession[] }).sessions
+  }
+
+  beforeEach(() => {
+    setup = setupDb()
+  })
+
+  afterEach(() => {
+    setup.cleanup()
+  })
+
+  it("returns top sessions ordered by cost DESC when sort=\"cost\"", () => {
+    insertSession(setup.dbPath, "root1", null, REFERENCE, { cost: 0.5, tokensInput: 100, tokensOutput: 100 })
+    insertSession(setup.dbPath, "root2", null, REFERENCE, { cost: 0.9, tokensInput: 10, tokensOutput: 10 })
+    insertSession(setup.dbPath, "root3", null, REFERENCE, { cost: 0.1, tokensInput: 1000, tokensOutput: 1000 })
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows.map((r) => r.id)).toEqual(["root2", "root1", "root3"])
+  })
+
+  it("orders by (tokens_input + tokens_output) DESC when sort=\"tokens\", not by cost", () => {
+    // root1 has highest cost but lowest total tokens; root3 has lowest cost but highest tokens
+    insertSession(setup.dbPath, "root1", null, REFERENCE, { cost: 0.9, tokensInput: 10, tokensOutput: 10 })
+    insertSession(setup.dbPath, "root2", null, REFERENCE, { cost: 0.5, tokensInput: 50, tokensOutput: 50 })
+    insertSession(setup.dbPath, "root3", null, REFERENCE, { cost: 0.1, tokensInput: 1000, tokensOutput: 1000 })
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "tokens")
+    const rows = sessions(result)
+    expect(rows.map((r) => r.id)).toEqual(["root3", "root2", "root1"])
+    expect(rows[0].tokens).toBe(2000)
+    expect(rows[1].tokens).toBe(100)
+    expect(rows[2].tokens).toBe(20)
+  })
+
+  it("only root sessions are included; subagent rows are excluded but counted via subagentCount", () => {
+    insertSession(setup.dbPath, "root1", null, REFERENCE, { cost: 0.9 })
+    insertSession(setup.dbPath, "root2", null, REFERENCE, { cost: 0.5 })
+    // subagents of root1 (high cost) must not appear in the top list
+    insertSession(setup.dbPath, "sub1", "root1", REFERENCE, { cost: 99 })
+    insertSession(setup.dbPath, "sub2", "root1", REFERENCE, { cost: 99 })
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows.map((r) => r.id).sort()).toEqual(["root1", "root2"])
+    expect(rows.find((r) => r.id === "root1")?.subagentCount).toBe(2)
+    expect(rows.find((r) => r.id === "root2")?.subagentCount).toBe(0)
+  })
+
+  it("subagentCount is correct per root (root with 2 subagents → 2)", () => {
+    insertSession(setup.dbPath, "root1", null, REFERENCE)
+    insertSession(setup.dbPath, "s1", "root1", REFERENCE)
+    insertSession(setup.dbPath, "s2", "root1", REFERENCE)
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows).toHaveLength(1)
+    expect(rows[0].id).toBe("root1")
+    expect(rows[0].subagentCount).toBe(2)
+  })
+
+  it("time window is half-open: startMs included, endMs excluded, earlier excluded", () => {
+    insertSession(setup.dbPath, "atStart", null, REFERENCE)
+    insertSession(setup.dbPath, "atEnd", null, REFERENCE + DAY)
+    insertSession(setup.dbPath, "before", null, REFERENCE - 1000)
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows.map((r) => r.id)).toEqual(["atStart"])
+  })
+
+  it("limits results to top 10 when more than 10 root sessions are in range", () => {
+    for (let i = 0; i < 12; i++) {
+      insertSession(setup.dbPath, `root${i}`, null, REFERENCE + i, { cost: i / 10 })
+    }
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows).toHaveLength(10)
+    // top 10 by cost DESC → the 10 highest costs
+    expect(rows[0].id).toBe("root11")
+    expect(rows[9].id).toBe("root2")
+  })
+
+  it("maps row fields onto the TopSession shape", () => {
+    insertSession(setup.dbPath, "root1", null, REFERENCE, {
+      title: "my session",
+      cost: 1.25,
+      tokensInput: 300,
+      tokensOutput: 200,
+    })
+
+    const result = queryTopSessions(setup.dbPath, REFERENCE, REFERENCE + DAY, "cost")
+    const rows = sessions(result)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      id: "root1",
+      title: "my session",
+      cost: 1.25,
+      tokensInput: 300,
+      tokensOutput: 200,
+      tokens: 500,
+      subagentCount: 0,
+      timeCreated: REFERENCE,
+    })
+  })
+
+  it("nonexistent DB path → returns { error: string }", () => {
+    const result = queryTopSessions("/nonexistent/path/to/db.db", 0, REFERENCE + DAY, "cost")
+    expect(result).toHaveProperty("error")
+    expect(typeof (result as { error: string }).error).toBe("string")
+    expect((result as { error: string }).error.length).toBeGreaterThan(0)
   })
 })
 

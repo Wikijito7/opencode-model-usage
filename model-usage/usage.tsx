@@ -10,7 +10,8 @@ import { resolveProjection } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, type PeriodStats } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, queryTopSessions, type PeriodStats, type TopSession } from "./db"
+import { openAnalyze } from "./analyze"
 import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/scroll"
 import { registerDialogKeyLayer, type KeyBinding } from "./wlib/keys"
@@ -22,6 +23,7 @@ import { CopiedFlash } from "./wlib/copied-flash"
 import { buildExport, buildExportData, type ExportPeriod } from "./helpers/export/usage"
 import { useDialogSizing } from "./wlib/dialog"
 import { resolveThemeColors } from "./wlib/theme"
+import { toggleSessionSort, clampScrollTop } from "./helpers/session-sort"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs, getCachedMonths, findNullCountMonths } from "./cache"
 import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
@@ -88,6 +90,9 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const [periodStats, setPeriodStats] = createSignal<PeriodStats | null>(null)
           const [showTrends, setShowTrends] = createSignal(false)
           const [showHelp, setShowHelp] = createSignal(false)
+          const [sessionView, setSessionView] = createSignal(false)
+          const [topSessions, setTopSessions] = createSignal<TopSession[]>([])
+          const [selectedSessionIdx, setSelectedSessionIdx] = createSignal(0)
           const fetchDailyTotals = (s: number, e: number) => {
             if (!db) return []
             const r = queryDailyTotals(db, s, e)
@@ -99,6 +104,21 @@ export function registerUsageCommand(api: TuiPluginApi) {
             return computeTrends()
           })
           const scroll = makeScrollState(createSignal)
+
+          const scrollSessionIntoView = () => {
+            const el = scroll.scrollRef
+            if (!el) return
+            const row = el.querySelector(`[data-session-idx="${selectedSessionIdx()}"]`) as HTMLElement | null
+            if (!row) return
+            const viewH = el.clientHeight || el.height || 0
+            const scrollH = el.scrollHeight || el.height || 0
+            const top = row.offsetTop
+            const bottom = top + row.offsetHeight
+            let scrollTop = el.scrollTop
+            if (top < scrollTop) scrollTop = top
+            else if (bottom > scrollTop + viewH) scrollTop = bottom - viewH
+            el.scrollTop = clampScrollTop(scrollTop, scrollH, viewH)
+          }
 
           const computeWindow = () => {
             if (granularity() === "month") {
@@ -261,6 +281,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
           function loadData(forceRefresh: boolean = false) {
             const { startMs, endMs } = computeWindow()
             const gran = granularity()
+            loadSessionData()
             const cachedStats = resolvePeriodStats(startMs, gran)
             setPeriodStats(cachedStats)
             const cacheKey = modelCacheKey(gran, startMs)
@@ -352,6 +373,20 @@ export function registerUsageCommand(api: TuiPluginApi) {
             runQueryPipeline(startMs, endMs, gran)
           }
 
+          // Loads the top root sessions for the current period when the session
+          // view is active. Runs on period/granularity changes (via loadData) and
+          // on the `s` toggle. Sessions have no "price" sort, so "price" maps to
+          // "cost"; only "tokens" keeps its own ordering.
+          function loadSessionData() {
+            if (!sessionView() || !db) return
+            const { startMs, endMs } = computeWindow()
+            const sortForSessions: "cost" | "tokens" = sortKey() === "tokens" ? "tokens" : "cost"
+            const r = queryTopSessions(db, startMs, endMs, sortForSessions)
+            if ("error" in r) return
+            setTopSessions(r.sessions)
+            setSelectedSessionIdx(0)
+          }
+
           let cleanupKeyLayer: (() => void) | null = null
 
           // Single source of truth for dialog key bindings — consumed by BOTH
@@ -364,6 +399,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
             { key: "m",        cmd: "usage.toggleMode",  desc: "Mode" },
             { key: "o",        cmd: "usage.toggleSort",  desc: "Sort" },
             { key: "g",        cmd: "usage.trends",      desc: "Trends" },
+            { key: "s",        cmd: "usage.toggleSessionView", desc: "Session View" },
+            { key: "enter",    cmd: "usage.openSession",  desc: "Open Session" },
             { key: "e",        cmd: "usage.export",      desc: "Export" },
             { key: "h",        cmd: "usage.help",        desc: "Help" },
             { key: "escape",   cmd: "usage.escape",      desc: "Close" },
@@ -517,7 +554,39 @@ export function registerUsageCommand(api: TuiPluginApi) {
               return true
             }
             if (key === "o") {
-              setSortKey(k => k === "tokens" ? "cost" : k === "cost" ? "price" : "tokens")
+              if (sessionView()) {
+                setSortKey(k => toggleSessionSort(k === "tokens" ? "tokens" : "cost"))
+                loadSessionData()
+              } else {
+                setSortKey(k => k === "tokens" ? "cost" : k === "cost" ? "price" : "tokens")
+              }
+              return true
+            }
+            if (key === "s") {
+              setSessionView(v => !v)
+              loadSessionData()
+              return true
+            }
+            if (key === "enter" && sessionView()) {
+              const list = topSessions()
+              const s = list[selectedSessionIdx()]
+              if (s) openAnalyze(api, s.id)
+              return true
+            }
+            if (key === "up" && sessionView()) {
+              const idx = selectedSessionIdx()
+              if (idx > 0) {
+                setSelectedSessionIdx(idx - 1)
+                setTimeout(() => scrollSessionIntoView(), 50)
+              }
+              return true
+            }
+            if (key === "down" && sessionView()) {
+              const idx = selectedSessionIdx()
+              if (idx < topSessions().length - 1) {
+                setSelectedSessionIdx(idx + 1)
+                setTimeout(() => scrollSessionIntoView(), 50)
+              }
               return true
             }
             if (key === "up") {
@@ -593,6 +662,8 @@ export function registerUsageCommand(api: TuiPluginApi) {
                   { name: "usage.toggleMode",  title: "Toggle Mode",    run: async () => { handleKey("m") } },
                   { name: "usage.toggleSort",  title: "Toggle Sort",    run: async () => { handleKey("o") } },
                   { name: "usage.trends",      title: "Toggle Trends",    run: async () => { handleKey("g") } },
+                  { name: "usage.toggleSessionView", title: "Toggle Session View", run: async () => { handleKey("s") } },
+                  { name: "usage.openSession", title: "Open Session", run: async () => { handleKey("enter") } },
                   { name: "usage.export",      title: "Export",         run: async () => { handleKey("e") } },
                   { name: "usage.help",        title: "Toggle Help",    run: async () => { handleKey("h") } },
                   { name: "usage.escape",      title: "Close",          run: async () => { handleKey("escape") } },
@@ -653,6 +724,31 @@ export function registerUsageCommand(api: TuiPluginApi) {
                       <text fg={red}><b>Error Fetching Usage</b></text>
                       <text fg={muted}>{errorMsg()}</text>
                     </box>
+                  ) : sessionView() ? (
+                    (() => {
+                      const list = topSessions()
+                      const sortForSessions = sortKey() === "tokens" ? "tokens" : "cost"
+                      if (list.length === 0) {
+                        return <text fg={muted}>{"\u2014"} No root sessions for {label}</text>
+                      }
+                      return (
+                        <box paddingBottom={0} flexDirection="column" gap={0}>
+                          <text fg={fg}><b>Top Sessions</b> (top {list.length} · sorted by {sortForSessions})</text>
+                          {list.map((s, i) => {
+                            const selected = i === selectedSessionIdx()
+                            const title = s.title || "(untitled)"
+                            return (
+                              <box key={s.id} data-session-idx={i} flexDirection="column" gap={0}>
+                                <text fg={selected ? primary : fg}>{i + 1}. {title}</text>
+                                <text fg={muted}>
+                                  {fmt(s.tokens)} tokens{s.cost > 0 ? ` \u2014 ${fmtCost(s.cost)}` : ""}{s.subagentCount > 0 ? ` \u00b7 ${s.subagentCount} subagents` : ""}
+                                </text>
+                              </box>
+                            )
+                          })}
+                        </box>
+                      )
+                    })()
                   ) : (
                     (() => {
                       const data = viewState() as UsageData
@@ -761,9 +857,28 @@ export function registerUsageCommand(api: TuiPluginApi) {
                 })()}
                 {hasLoadedOnce() && (
                   <box flexDirection="row" gap={1}>
-                    <text fg={muted}>← → {gran}  ·  ↑↓ scroll  · </text>
-                    <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
-                    <text fg={muted}>  ·  h help</text>
+                    {sessionView() ? (
+                      <>
+                        <text fg={muted}>↑↓</text>
+                        <text fg={muted}>navigate</text>
+                        <text fg={muted}>·</text>
+                        <text fg={muted}>enter</text>
+                        <text fg={muted}>analyze</text>
+                      </>
+                    ) : (
+                      <>
+                        <text fg={muted}>← →</text>
+                        <text fg={muted}>{gran}</text>
+                        <text fg={muted}>·</text>
+                        <text fg={muted}>↑↓</text>
+                        <text fg={muted}>scroll</text>
+                      </>
+                    )}
+                    <text fg={muted}>·</text>
+                    <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={muted} />
+                    <text fg={muted}>·</text>
+                    <text fg={muted}>h</text>
+                    <text fg={muted}>help</text>
                   </box>
                 )}
               </box>
