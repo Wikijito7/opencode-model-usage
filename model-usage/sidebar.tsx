@@ -4,7 +4,7 @@ import type { AssistantMessage, Message, EventMessageUpdated, EventSessionCompac
 import { createSignal, createEffect, createMemo, onCleanup } from "solid-js"
 import type { CopilotQuotaInfo, GoQuotaInfo } from "./types"
 import { log as logFn, DEBUG, logPath } from "./helpers/debug"
-import { isSupportedModel } from "./helpers/model"
+import { isCopilotModel, isOpencodeGoModel, resolveActiveModel, buildUsageHeaderLabel, type ActiveModelInfo } from "./helpers/model"
 import { buildProgressBar, getUsageColor, getQuotaLabel, formatDuration } from "./helpers/format"
 import { splitCost } from "./helpers/cost"
 import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
@@ -23,7 +23,7 @@ const MAX_POLL_ATTEMPTS = 30
 
 log(`=== usage-sidebar v${PLUGIN_VERSION} loaded ===`)
 
-function getActiveModel(api: TuiPluginApi, sessionID: string): string | null {
+function getActiveModel(api: TuiPluginApi, sessionID: string): ActiveModelInfo | null {
   try {
     const configModel = api.state.config?.model
     log("getActiveModel: config.model:", JSON.stringify(configModel))
@@ -31,41 +31,13 @@ function getActiveModel(api: TuiPluginApi, sessionID: string): string | null {
     for (const p of api.state.provider ?? []) {
       log("getActiveModel: provider id:", p.id, "name:", p.name)
     }
-    if (sessionID) {
-      const msgs = api.state.session.messages(sessionID)
-      log("getActiveModel: messages count:", msgs.length)
-      for (let i = Math.max(0, msgs.length - 3); i < msgs.length; i++) {
-        const m = msgs[i]
-        if (m.role === "assistant") {
-          log("getActiveModel: assistant msg providerID:", m.providerID, "modelID:", m.modelID)
-        }
-        if (m.role === "user") {
-          // `model` only exists on UserMessage, already guarded by role check
-          log("getActiveModel: user msg model:", JSON.stringify((m as any).model))
-        }
-      }
-    }
+    const messages = sessionID ? api.state.session.messages(sessionID) : []
+    log("getActiveModel: messages count:", messages.length)
 
-    // 1. Check global config model (format: "provider/model")
-    if (configModel && isSupportedModel(configModel)) {
-      log("getActiveModel: found via config.model:", configModel)
-      return configModel
-    }
-
-    // 2. Check last assistant message in current session
-    if (sessionID) {
-      const messages = api.state.session.messages(sessionID)
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const msg = messages[i]
-        if (msg.role === "assistant" && (msg.providerID?.includes("copilot") || msg.providerID === "opencode-go") && msg.modelID) {
-          const result = `${msg.providerID}/${msg.modelID}`
-          log("getActiveModel: found via last assistant message:", result)
-          return result
-        }
-      }
-    }
-
-    log("getActiveModel: no copilot model found")
+    // 1. Global config model (format: "provider/model") wins, then last assistant message.
+    const info = resolveActiveModel(configModel, messages)
+    log("getActiveModel: resolved:", JSON.stringify(info))
+    return info
   } catch (err) {
     log("getActiveModel error:", String(err))
   }
@@ -226,7 +198,7 @@ function useTokenTracking(props: { api: TuiPluginApi; sessionID: string }) {
 
 // ─── Quota fetching hook ──────────────────────────────────────────────────────
 
-function useQuotaFetching(props: { api: TuiPluginApi; sessionID: string; githubToken: string; hasToken: boolean; currentModel: () => string | null }) {
+function useQuotaFetching(props: { api: TuiPluginApi; sessionID: string; githubToken: string; hasToken: boolean; currentModel: () => string | null; currentProvider: () => string | null }) {
   const [quotaInfo, setQuotaInfo] = createSignal<CopilotQuotaInfo | null>(null)
   const [quotaLoading, setQuotaLoading] = createSignal<boolean>(false)
   const [goQuota, setGoQuota] = createSignal<GoQuotaInfo | null>(null)
@@ -267,17 +239,19 @@ function useQuotaFetching(props: { api: TuiPluginApi; sessionID: string; githubT
   const fetchQuota = guardedFetchQuota
   const fetchGoQuotaGuarded = guardedFetchGoQuota
 
-  const isCopilotActive = createMemo(() => props.currentModel()?.toLowerCase().includes("copilot") ?? false)
-  const isOpenCodeGoActive = createMemo(() => props.currentModel()?.toLowerCase().includes("opencode-go") ?? false)
+  const isCopilotActive = createMemo(() => isCopilotModel(props.currentModel() ?? "") || isCopilotModel(props.currentProvider() ?? ""))
+  const isOpenCodeGoActive = createMemo(() => isOpencodeGoModel(props.currentModel() ?? "") || isOpencodeGoModel(props.currentProvider() ?? ""))
 
   // Quota refresh intervals — registered once so they are not cancelled and
   // recreated on every reactive re-run (every message update).
   const refreshInterval = setInterval(() => {
-    fetchQuota()
+    if (isCopilotActive()) {
+      fetchQuota()
+    }
   }, QUOTA_REFRESH_MS)
 
   const goRefreshInterval = setInterval(() => {
-    if (props.currentModel()?.toLowerCase().includes("opencode-go")) {
+    if (isOpenCodeGoActive()) {
       fetchGoQuotaGuarded()
     }
   }, QUOTA_REFRESH_MS)
@@ -319,10 +293,12 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
 
   // Reactive model detection: re-runs when config.model or session changes
   // api.state is SolidJS-backed, so property access creates reactive dependencies
-  const currentModel = createMemo(() => {
+  const activeModelInfo = createMemo(() => {
     props.api.state.config?.model // track model changes
     return getActiveModel(props.api, props.session_id)
   })
+
+  const currentModel = createMemo(() => activeModelInfo()?.modelID ?? null)
 
   const tokenTracking = useTokenTracking({ api: props.api, sessionID: props.session_id })
   const {
@@ -346,6 +322,7 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
     githubToken,
     hasToken,
     currentModel,
+    currentProvider: () => activeModelInfo()?.providerID ?? null,
   })
 
   let loadedQuotaSessionID: string | null = null
@@ -356,11 +333,12 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
   const modelPoller = setInterval(() => {
     pollCount++
     const detected = getActiveModel(props.api, props.session_id)
-    if (detected !== activeModel()) {
-      log("poll #" + pollCount + " model change:", detected)
-      setActiveModel(detected)
+    const detectedModelID = detected?.modelID ?? null
+    if (detectedModelID !== activeModel()) {
+      log("poll #" + pollCount + " model change:", detectedModelID)
+      setActiveModel(detectedModelID)
     }
-    if (detected && pollCount > MAX_POLL_ATTEMPTS) {
+    if (detectedModelID && pollCount > MAX_POLL_ATTEMPTS) {
       clearInterval(modelPoller)
     }
   }, 2000)
@@ -386,20 +364,24 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
       })
       .catch(() => { /* keep optimistic true */ })
 
-    const model = currentModel()
+    const info = activeModelInfo()
+    const model = info?.modelID ?? null
+    const provider = info?.providerID ?? null
+    const isCopilot = isCopilotModel(model ?? "") || isCopilotModel(provider ?? "")
+    const isGo = isOpencodeGoModel(model ?? "") || isOpencodeGoModel(provider ?? "")
     setActiveModel(model)
-    log("createEffect: sessionID:", sessionID, "model:", model, "isSupported:", model ? isSupportedModel(model) : false)
+    log("createEffect: sessionID:", sessionID, "model:", model, "provider:", provider, "isCopilot:", isCopilot, "isOpencodeGo:", isGo)
 
-    if (model && isSupportedModel(model)) {
-      loadRelatedSessionTokens(sessionID) // works for both
-      if (model.toLowerCase().includes("copilot")) {
+    if (model) {
+      loadRelatedSessionTokens(sessionID) // works for all providers
+      if (isCopilot) {
         // Copilot: fetch quota on session change
         if (loadedQuotaSessionID !== sessionID) {
           fetchQuota()
           loadedQuotaSessionID = sessionID
         }
       }
-      if (model.toLowerCase().includes("opencode-go")) {
+      if (isGo) {
         // opencode-go: fetch go quota once per session change
         if (loadedGoQuotaSessionID !== sessionID) {
           loadedGoQuotaSessionID = sessionID
@@ -460,11 +442,11 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
 
       // Refresh quota only for root session compaction
       if (evtSID === sessionID) {
-        if (isRootSession && Date.now() - getLastQuotaFetchAt() > QUOTA_EVENT_MIN_INTERVAL_MS) {
+        if (isRootSession && isCopilotActive() && Date.now() - getLastQuotaFetchAt() > QUOTA_EVENT_MIN_INTERVAL_MS) {
           fetchQuota()
           log("session.compacted: quota refreshed, sessionID:", sessionID)
         } else {
-          log("session.compacted: quota fetch skipped (subagent or too recent), sessionID:", sessionID)
+          log("session.compacted: quota fetch skipped (subagent, not copilot, or too recent), sessionID:", sessionID)
         }
       }
 
@@ -506,17 +488,12 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
 
   const usageColor = createMemo(() => getUsageColor(usagePercentage()))
 
-  const isSupported = createMemo(() => {
-    const model = currentModel()
-    return !!(model && isSupportedModel(model))
-  })
+  const hasActiveModel = createMemo(() => !!activeModelInfo())
 
   const providerLabel = createMemo(() => {
-    const model = currentModel()
-    if (!model) return "Usage"
-    if (model.toLowerCase().includes("opencode-go")) return "OpenCode Go Usage"
-    if (model.toLowerCase().includes("copilot")) return "GitHub Copilot Usage"
-    return "Usage"
+    const info = activeModelInfo()
+    if (!info) return "Usage"
+    return buildUsageHeaderLabel(info.providerID, info.modelID)
   })
 
   const cacheHitRate = createMemo(() => {
@@ -527,13 +504,13 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
     return Math.round((cacheRead / total) * 100)
   })
 
-  log("UsageSidebar: render, isSupported:", isSupported(), "activeModel:", currentModel())
+  log("UsageSidebar: render, hasActiveModel:", hasActiveModel(), "activeModel:", currentModel())
 
   const { fg, muted } = resolveThemeColors(props.api.theme.current)
 
   return (
     <box flexDirection="column" gap={0}>
-      {isSupported() ? (
+      {hasActiveModel() ? (
         <>
           <text fg={fg}><strong>{providerLabel()}</strong></text>
           <text fg={muted}>Cost estimation</text>
