@@ -405,7 +405,15 @@ export function registerUsageCommand(api: TuiPluginApi) {
               }
               const state = resolveProjection(data.totalCost, granularity() === "month" && monthOffset() === 0, getDayOfMonth(), getDaysInMonth())
               const projection = state.kind === "projected" ? state.projection : null
-              const exportData = buildExportData(data, sortedModels, period, currentSort, projection, periodStats(), computeTrends())
+              const exportData = buildExportData({
+                usage: data,
+                sortedModels,
+                period,
+                sortKey: currentSort,
+                projection,
+                periodStats: periodStats(),
+                trends: computeTrends(),
+              })
               return buildExport(format, exportData)
             },
           }
@@ -855,7 +863,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                       </>
                     )}
                     <text fg={muted}>·</text>
-                    <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={muted} />
+                    <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
                     <text fg={muted}>·</text>
                     <text fg={muted}>h</text>
                     <text fg={muted}>help</text>
