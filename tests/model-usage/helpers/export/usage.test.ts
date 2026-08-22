@@ -805,7 +805,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1700, 400, 1.65)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(2)
     expect(result.sortMode).toBe("tokens")
@@ -838,7 +838,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 2300, 700, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.rows[0].totalTokens).toBe(2000)
     expect(result.rows[1].totalTokens).toBe(1000)
@@ -865,7 +865,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1500, 600, 4.0) // totalCost = 4.0
 
-    const result = buildExportData(usage, models, PERIOD, COST, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: COST, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(2)
     expect(result.sortMode).toBe("cost")
@@ -892,7 +892,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1500, 600, 4.0) // totalCost = 4.0
 
-    const result = buildExportData(usage, models, PERIOD, PRICE, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: PRICE, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(2)
     expect(result.sortMode).toBe("price")
@@ -906,9 +906,9 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1000, 500, 3.0)
 
-    expect(buildExportData(usage, models, PERIOD, TOKENS, null, null, null).sortMode).toBe("tokens")
-    expect(buildExportData(usage, models, PERIOD, COST, null, null, null).sortMode).toBe("cost")
-    expect(buildExportData(usage, models, PERIOD, PRICE, null, null, null).sortMode).toBe("price")
+    expect(buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null }).sortMode).toBe("tokens")
+    expect(buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: COST, projection: null, periodStats: null, trends: null }).sortMode).toBe("cost")
+    expect(buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: PRICE, projection: null, periodStats: null, trends: null }).sortMode).toBe("price")
   })
 
   it("returns sharePct 0 (no NaN) for every row when total cost is zero in cost mode", () => {
@@ -937,7 +937,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1500, 600, 0) // totalCost = 0
 
-    const result = buildExportData(usage, models, PERIOD, COST, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: COST, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(2)
     for (const row of result.rows) {
@@ -952,7 +952,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 2000, 500, 2.0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.sortMode).toBe("tokens")
     expect(result.totalInput).toBe(2000)
@@ -964,7 +964,7 @@ describe("buildExportData", () => {
   it("returns an empty rows list for empty models but still populates totals", () => {
     const usage = makeUsage([], 0, 0, 0)
 
-    const result = buildExportData(usage, [], PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: [], period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.sortMode).toBe("tokens")
     expect(result.rows).toEqual([])
@@ -981,7 +981,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 0, 0, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(2)
     for (const row of result.rows) {
@@ -998,7 +998,7 @@ describe("buildExportData", () => {
     // usage totals exceed the sum of the model rows (e.g. truncated/partial rows)
     const usage = makeUsage(models, 6000, 2000, 0) // grand total = 8000
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     const modelTokenSum = 2000 + 1000 // 3000, != grand total 8000
     expect(modelTokenSum).not.toBe(usage.totalInput + usage.totalOutput)
@@ -1014,7 +1014,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 100, 50, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.period).toBe(PERIOD)
     expect(result.period).toEqual(PERIOD)
@@ -1049,7 +1049,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 1600, 900, 3)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.rows).toHaveLength(3)
     expect(result.rows[0].costPerMillion).toBe(3000)
@@ -1068,7 +1068,7 @@ describe("buildExportData", () => {
       totalDays: 16,
     }
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, projection, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection, periodStats: null, trends: null })
 
     expect(result.projection).toEqual(projection)
   })
@@ -1079,7 +1079,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 100, 50, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.projection).toBeNull()
   })
@@ -1094,7 +1094,7 @@ describe("buildExportData", () => {
       messages: 1337,
     }
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, periodStats, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats, trends: null })
 
     expect(result.periodStats).toEqual(periodStats)
   })
@@ -1105,7 +1105,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 100, 50, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.periodStats).toBeNull()
   })
@@ -1121,7 +1121,7 @@ describe("buildExportData", () => {
       peakWeekday: "Wednesday",
     }
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, trends)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends })
 
     expect(result.trends).toEqual(trends)
   })
@@ -1132,7 +1132,7 @@ describe("buildExportData", () => {
     ]
     const usage = makeUsage(models, 100, 50, 0)
 
-    const result = buildExportData(usage, models, PERIOD, TOKENS, null, null, null)
+    const result = buildExportData({ usage, sortedModels: models, period: PERIOD, sortKey: TOKENS, projection: null, periodStats: null, trends: null })
 
     expect(result.trends).toBeNull()
   })

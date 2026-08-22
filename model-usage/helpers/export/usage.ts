@@ -406,15 +406,18 @@ export function buildExport(format: ExportFormat, data: ExportData): string {
  * otherwise. Passing the current `sortKey` keeps the exported percentages
  * consistent with what the dialog displays.
  */
-export function buildExportData(
-  usage: UsageData,
-  sortedModels: ModelUsage[],
-  period: ExportPeriod,
-  sortKey: ModelSortKey,
-  projection: ExportProjection | null,
-  periodStats: ExportPeriodStats | null,
-  trends: ExportTrends | null,
-): ExportData {
+export interface BuildExportDataOptions {
+  usage: UsageData
+  sortedModels: ModelUsage[]
+  period: ExportPeriod
+  sortKey: ModelSortKey
+  projection: ExportProjection | null
+  periodStats: ExportPeriodStats | null
+  trends: ExportTrends | null
+}
+
+export function buildExportData(options: BuildExportDataOptions): ExportData {
+  const { usage, sortedModels, period, sortKey, projection, periodStats, trends } = options
   const moneySort = sortKey === "cost" || sortKey === "price"
 
   // grandTotal == the dialog's totalTokens (input + output across all usage)
