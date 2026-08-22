@@ -10,9 +10,9 @@ import { splitCost } from "./helpers/cost"
 import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
 import { getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "./helpers/dates"
 import { appendFileSync } from "node:fs"
-import { createLoadGuard } from "./wlib/reload"
+import { createLoadGuard } from "./wlib/src/core/reload"
 import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
-import { resolveThemeColors } from "./wlib/theme"
+import { resolveThemeColors } from "./wlib/src/core/theme"
 import { PLUGIN_VERSION } from "./version"
 
 const log = logFn

@@ -4,7 +4,7 @@
  * naming so call sites and existing log files don't change.
  */
 
-import { createLog } from "../wlib/log"
+import { createLog } from "../wlib/src/core/log"
 
 export const DEBUG = process.env.OPENCODE_COPILOT_DEBUG === "true"
 export const logsDir = new URL("../logs", import.meta.url).pathname

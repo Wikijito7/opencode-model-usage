@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test"
-import { resolveClipboardCandidates, buildOsc52Sequence } from "@model-usage/wlib/clipboard"
+import { resolveClipboardCandidates, buildOsc52Sequence } from "@model-usage/wlib/src/core/clipboard"
 
 // ─── resolveClipboardCandidates ──────────────────────────────────────────────
 

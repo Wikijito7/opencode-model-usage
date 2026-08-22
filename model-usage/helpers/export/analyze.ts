@@ -13,7 +13,7 @@
  * so this stays unit-testable in isolation. Named exports only.
  */
 
-import { EXPORT_FORMATS, type ExportFormat } from "../../wlib/export"
+import { EXPORT_FORMATS, type ExportFormat } from "../../wlib/src/core/export"
 import type { AnalysisData, Category, CategoryEntry, FormattedHotspotResult } from "../../analyze-domain"
 import type { ModelStat } from "../models"
 import type { CompactionSummary } from "../compaction"

@@ -8,7 +8,7 @@ import {
   buildText,
   type AnalyzeExportData,
 } from "@model-usage/helpers/export/analyze"
-import { EXPORT_FORMATS, type ExportFormat } from "@model-usage/wlib/export"
+import { EXPORT_FORMATS, type ExportFormat } from "@model-usage/wlib/src/core/export"
 import type { AnalysisData } from "@model-usage/analyze-domain"
 import type { ModelStat } from "@model-usage/helpers/models"
 
