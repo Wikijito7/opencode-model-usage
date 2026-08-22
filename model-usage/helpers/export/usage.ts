@@ -8,8 +8,8 @@
  * in isolation.
  */
 
-import { EXPORT_FORMATS } from "../../wlib/export"
-import type { ExportFormat } from "../../wlib/export"
+import { EXPORT_FORMATS } from "../../wlib/src/core/export"
+import type { ExportFormat } from "../../wlib/src/core/export"
 import type { UsageData, ModelUsage } from "../../types"
 import type { ModelSortKey } from "../models"
 import { costPerMillion } from "../models"

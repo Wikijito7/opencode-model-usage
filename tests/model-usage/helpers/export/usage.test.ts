@@ -10,7 +10,7 @@ import {
   type ExportRow,
   type ExportPeriod,
 } from "@model-usage/helpers/export/usage"
-import { EXPORT_FORMATS, type ExportFormat } from "@model-usage/wlib/export"
+import { EXPORT_FORMATS, type ExportFormat } from "@model-usage/wlib/src/core/export"
 import type { ModelSortKey } from "@model-usage/helpers/models"
 import type { ModelUsage, UsageData } from "@model-usage/types"
 

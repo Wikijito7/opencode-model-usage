@@ -12,7 +12,7 @@ import { aggregateModelStats } from "./helpers/models"
 import type { ModelUsageRecord, ModelStat } from "./helpers/models"
 import { splitSystemFragments } from "./helpers/fragments"
 import { loadBaseline } from "./db"
-import { readSystemSnapshot } from "./wlib/system"
+import { readSystemSnapshot } from "./wlib/src/core/system"
 import type { SystemFragment, SystemSnapshot, SystemSource, ToolDefSnapshot } from "./types"
 import type { Message, Part } from "@opencode-ai/sdk/v2"
 
