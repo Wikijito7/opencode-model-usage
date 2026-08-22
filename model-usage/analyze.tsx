@@ -309,7 +309,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
     // The export controller must be created inside this Solid owner so its
     // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
     // disposed when the dialog closes.
-    exporter = createExportController(api, exportable)
+    exporter = createExportController(api, exportable, { name: "analyze" })
 
     // ── Central key dispatcher ──────────────────────────────────────
     // Single entry point for every key: routes the export overlay first,
@@ -845,6 +845,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
         <HelpOverlay rows={buildHelpRows(analyzeBindings)} fg={fg} muted={muted} bg={panel} title="Analyze Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
       )}
       {exporter!.renderOverlay()}
+      {exporter!.renderResultOverlay()}
       </>
     )
   })

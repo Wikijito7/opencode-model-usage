@@ -592,7 +592,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             // The export controller must be created inside this Solid owner so its
             // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
             // disposed when the dialog closes.
-            exporter = createExportController(api, exportable)
+            exporter = createExportController(api, exportable, { name: "usage" })
             // Desired large/40 — falls back to fit the terminal (never cut off).
             const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
             log(
@@ -874,6 +874,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
                 <HelpOverlay rows={buildHelpRows(usageBindings)} fg={fg} muted={muted} bg={panel} title="Usage Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
               )}
               {exporter!.renderOverlay()}
+              {exporter!.renderResultOverlay()}
               </>
             )
           }, () => {
