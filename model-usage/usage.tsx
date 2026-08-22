@@ -26,7 +26,7 @@ import { resolveThemeColors } from "./wlib/theme"
 import { toggleSessionSort, clampScrollTop } from "./helpers/session-sort"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs, getCachedMonths, findNullCountMonths } from "./cache"
-import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries } from "./usage-domain"
+import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries, modelCacheKey, prefetchTarget } from "./usage-domain"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
 export function registerUsageCommand(api: TuiPluginApi) {
@@ -151,10 +151,6 @@ export function registerUsageCommand(api: TuiPluginApi) {
           const modelCache = new Map<string, UsageData>()
           const buildingMonths = new Set<number>()
 
-          function modelCacheKey(gran: Granularity, startMs: number): string {
-            return `${gran}:${startMs}`
-          }
-
           function computeAndSetDiff(startMs: number, currentTotal: number) {
             const prev = findPreviousPeriodTotal(startMs, granularity(), getMonthCache)
             setDiffInfo(formatPercentDiff(currentTotal, prev))
@@ -219,30 +215,14 @@ export function registerUsageCommand(api: TuiPluginApi) {
             }
           }
 
-          function schedulePrefetch(startMs: number, endMs: number) {
+          function schedulePrefetch(startMs: number, endMs: number, gran: Granularity) {
             setTimeout(() => {
               if (cleanedUp || !db) return
-              const nextGran = granularity()
-              if (nextGran === "month") {
-                const d = new Date(startMs)
-                const nextStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)
-                const nextKey = modelCacheKey("month", nextStart)
-                if (!modelCache.has(nextKey)) {
-                  const nextEnd = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 2, 1)
-                  const adjResult = queryUsage(db, nextStart, nextEnd)
-                  if (!("error" in adjResult)) {
-                    modelCache.set(nextKey, adjResult)
-                  }
-                }
-              } else {
-                const periodMs = nextGran === "week" ? 7 * MS_PER_DAY : MS_PER_DAY
-                const nextStart = startMs + periodMs
-                const nextKey = modelCacheKey(nextGran, nextStart)
-                if (!modelCache.has(nextKey)) {
-                  const adjResult = queryUsage(db, nextStart, nextStart + periodMs)
-                  if (!("error" in adjResult)) {
-                    modelCache.set(nextKey, adjResult)
-                  }
+              const { nextStart, nextEnd, nextKey } = prefetchTarget(startMs, gran)
+              if (!modelCache.has(nextKey)) {
+                const adjResult = queryUsage(db, nextStart, nextEnd)
+                if (!("error" in adjResult)) {
+                  modelCache.set(nextKey, adjResult)
                 }
               }
             }, PREFETCH_DELAY_MS)
@@ -268,7 +248,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             if (!hasLoadedOnce()) setHasLoadedOnce(true)
 
             scheduleHierarchyBuild(startMs, endMs, gran)
-            schedulePrefetch(startMs, endMs)
+            schedulePrefetch(startMs, endMs, gran)
           }
 
           function refreshInBackground(startMs: number, endMs: number, gran: Granularity) {

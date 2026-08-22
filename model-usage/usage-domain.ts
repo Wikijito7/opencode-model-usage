@@ -7,6 +7,27 @@ import { type CachePeriod, MS_PER_DAY, getPrevMonthStartMs } from "./cache"
 
 export type Granularity = "month" | "week" | "day"
 
+// ─── Cache keys & prefetch target ───────────────────────────────────────────
+
+export function modelCacheKey(gran: Granularity, startMs: number): string {
+  return `${gran}:${startMs}`
+}
+
+export function prefetchTarget(
+  startMs: number,
+  gran: Granularity
+): { nextStart: number; nextEnd: number; nextKey: string } {
+  if (gran === "month") {
+    const d = new Date(startMs)
+    const nextStart = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)
+    const nextEnd = Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 2, 1)
+    return { nextStart, nextEnd, nextKey: modelCacheKey("month", nextStart) }
+  }
+  const periodMs = gran === "week" ? 7 * MS_PER_DAY : MS_PER_DAY
+  const nextStart = startMs + periodMs
+  return { nextStart, nextEnd: nextStart + periodMs, nextKey: modelCacheKey(gran, nextStart) }
+}
+
 // ─── Aggregation ────────────────────────────────────────────────────────────
 
 export function computeUsageDataFromRows(rows: RawUsageRow[]): UsageData {
