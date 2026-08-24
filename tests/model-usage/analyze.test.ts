@@ -293,6 +293,62 @@ IMPORTANT: You must NEVER generate or guess URLs.`
     expect(promptFrag!.tokens).toBeGreaterThan(0)
   })
 
+  it("terminates a persona-injector block using the explicit '---' separator", () => {
+    const text = `Instructions from: persona-injector
+## 🗿 bro mode active 🗿
+
+stay in character as aura grinder 🌾 and cook so the squads aura stays stacked.
+
+---
+
+You are OpenCode, the best coding agent on the planet.
+
+You are an interactive CLI tool that helps users with software engineering tasks.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    expect(personaFrag!.tokens).toBeLessThan(50)
+    expect(promptFrag!.tokens).toBeGreaterThan(20)
+  })
+
+  it("handles legacy sessions without '---' using case-insensitive OpenCode preamble", () => {
+    const text = `Instructions from: persona-injector
+## 🗿 bro mode active 🗿
+
+stay in character as aura grinder 🌾 and cook so the squads aura stays stacked.
+
+You are OpenCode, the best coding agent on the planet.
+
+You are an interactive CLI tool that helps users with software engineering tasks.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    expect(personaFrag!.tokens).toBeLessThan(50)
+    expect(promptFrag!.tokens).toBeGreaterThan(20)
+  })
+
+  it("handles legacy sessions with 'You are opencode, an interactive CLI agent'", () => {
+    const text = `Instructions from: persona-injector
+## 🍌 JUNGLE MODE ACTIVE 🍌
+You are **Warrior Monke**!
+
+You are opencode, an interactive CLI agent specializing in software engineering tasks.`
+    const frags = splitSystemFragments(text)
+    expect(frags.length).toBe(2)
+    const personaFrag = frags.find((f) => f.label === "persona-injector")
+    const promptFrag = frags.find((f) => f.label === "Agent System Prompt")
+    expect(personaFrag).toBeDefined()
+    expect(promptFrag).toBeDefined()
+    expect(personaFrag!.tokens).toBeLessThan(30)
+    expect(promptFrag!.tokens).toBeGreaterThan(10)
+  })
+
   it("merges other stray marker-less content gaps into a single 'Other' fragment with combined token count", () => {
     const text = `<available_references>
 Ref contents
