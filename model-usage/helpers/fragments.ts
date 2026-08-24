@@ -21,7 +21,7 @@ const PLUGIN_INJECTION_MARKER = /^(jungle-mode\/|persona-injector)/
 // following a plugin-injected section. Fallback boundary signal when the
 // injected persona prompt does not end with a trailing newline (single
 // blank line separator instead of the usual two).
-const AGENT_PREAMBLE = /^(You are opencode, an interactive CLI tool|You are the \*\*Lead Coordinator Agent\*\*)/
+const AGENT_PREAMBLE = /^(You are (OpenCode|opencode)\b|You are (the )?(\*\*)?Lead Coordinator Agent(\*\*)?|You are an? (interactive CLI|specialized|agent|software))/i
 
 export function splitSystemFragments(systemText: string, maxFragments = 100): SystemFragment[] {
   if (!systemText || systemText.trim().length === 0) return []
@@ -48,7 +48,7 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
 
   // Section-starting lines that can never be persona content — hitting one
   // means the plugin section has ended.
-  const isSectionStarter = (l: string) => /^Instructions from:\s*(.+)$/.test(l) || sectionOpen.test(l)
+  const isSectionStarter = (l: string) => /^Instructions from:\s*(.+)$/.test(l) || sectionOpen.test(l) || l.trim() === "---"
 
   const push = () => {
     if (current && current.text.trim().length > 0) {
@@ -75,6 +75,13 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
     // prompt. Headers within this section (like `## 🍌 JUNGLE MODE ACTIVE 🍌`)
     // are content, not separate fragments.
     if (pluginMode) {
+      if (line.trim() === "---") {
+        push()
+        pluginMode = false
+        afterPluginMode = true
+        continue
+      }
+
       // A new section marker always ends the plugin section — process the
       // line as its own fragment below.
       if (isSectionStarter(line)) {
@@ -94,11 +101,11 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
         pluginBlankCount++
         // Boundary: two consecutive blank lines (persona prompt ends with
         // a trailing newline), or a single blank line followed by the next
-        // section (persona prompt without trailing newline).
+        // section (persona prompt without trailing newline or with --- separator).
         const next = lines[i + 1]
         const atBoundary =
           pluginBlankCount >= 2 ||
-          (next !== undefined && (AGENT_PREAMBLE.test(next) || isSectionStarter(next)))
+          (next !== undefined && (next.trim() === "---" || AGENT_PREAMBLE.test(next) || isSectionStarter(next)))
         if (atBoundary) {
           push()
           pluginMode = false
@@ -148,6 +155,12 @@ export function splitSystemFragments(systemText: string, maxFragments = 100): Sy
       current.text += line + "\n"
     } else {
       // current is null. This is a marker-less line.
+      if (afterPluginMode && line.trim() === "---") {
+        continue
+      }
+      if (line.trim().length === 0) {
+        continue
+      }
       let label = ""
       if (!hasCreatedAnyBucket) {
         label = "Agent System Prompt"
