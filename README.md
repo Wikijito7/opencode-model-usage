@@ -10,7 +10,7 @@ Hooks `experimental.chat.system.transform` to capture a pre-mutation server snap
 ### Sidebar
 Cost estimation (price-weighted input/output split from API) plus provider-specific quota:
 - **GitHub Copilot** — premium request counting + monthly quota from GitHub API
-- **opencode-go** — rolling (5h), weekly, and monthly quota scraped from opencode.ai
+- **opencode-go** — rolling (5h), weekly, and monthly quota from the OpenCode Go usage API (`GET https://opencode.ai/zen/go/v1/usage`); falls back to scraping the workspace Go page when no Bearer key is available
 
 When the active provider exposes a monthly quota, the sidebar also projects month-end usage: `X% projected by <month end>` once at least 3 days of the month have elapsed (before that, `calculating projection...`).
 
@@ -67,10 +67,10 @@ Exports include the full raw system prompt and raw tool-definition text, preserv
 ## Requirements
 
 - `GITHUB_TOKEN` (for Copilot quota display)
-- `OPENCODE_GO_WORKSPACE_ID` (for opencode-go quota display) plus one auth option:
-  - `OPENCODE_GO_AUTH_COOKIE` — browser auth cookie (preferred; required for fetching the web console page)
-  - `~/.local/share/opencode/auth.json` — `opencode-go` entry with `type: "api"` (bearer fallback; checked before `OPENCODE_GO_API_KEY`)
-  - `OPENCODE_GO_API_KEY` — last-resort bearer fallback (may not work for the web page)
+- opencode-go quota uses the first available credential, in priority order:
+  - `OPENCODE_GO_API_KEY` — Console API key, sent as `Authorization: Bearer` to the usage API (preferred)
+  - `~/.local/share/opencode/auth.json` — `opencode-go` entry with `type: "api"` (used when the env var is unset)
+  - `OPENCODE_GO_AUTH_COOKIE` — legacy browser auth cookie; only used when no Bearer key is available, and additionally requires `OPENCODE_GO_WORKSPACE_ID` to scrape the workspace Go page. Accepts either a value-only auth cookie or a full `Cookie` header.
 
 ## Debug
 

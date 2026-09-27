@@ -1,7 +1,20 @@
 import { existsSync, readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import type { CopilotQuotaInfo, GoQuotaInfo } from "./types"
+import type { CopilotQuotaInfo, GoQuotaBar, GoQuotaInfo } from "./types"
 import { log } from "./helpers/debug"
+
+/** Canonical JSON usage endpoint (Bearer console API key, no workspace/cookie). */
+const GO_USAGE_API_URL = "https://opencode.ai/zen/go/v1/usage"
+
+/** Legacy workspace Go console page (HTML scrape, cookie auth). */
+const GO_LEGACY_WORKSPACE_URL = "https://opencode.ai/workspace"
+
+/** Matches the inline usage objects embedded in the legacy Go console HTML. */
+const LEGACY_QUOTA_PATTERNS: Record<keyof GoQuotaInfo, RegExp> = {
+  rolling: /rollingUsage:\$R\[\d+\]=(\{[^}]+\})/,
+  weekly: /weeklyUsage:\$R\[\d+\]=(\{[^}]+\})/,
+  monthly: /monthlyUsage:\$R\[\d+\]=(\{[^}]+\})/,
+}
 
 /**
  * Creates a simple re-entrancy guard. Returns a wrapper that ensures only one
@@ -21,82 +34,280 @@ export function withGuard<T>(fn: () => Promise<T>): () => Promise<T | undefined>
   }
 }
 
-export function getGoAuth(): { type: "bearer" | "cookie"; value: string } | null {
-  // Cookie auth first — required for fetching the web console page
-  const cookie = process.env.OPENCODE_GO_AUTH_COOKIE
-  if (cookie) return { type: "cookie", value: cookie }
+export type GoAuth = { type: "bearer" | "cookie"; value: string }
 
-  // Bearer token fallback (inference key, may not work for web page)
+/**
+ * Resolve Go credentials, in priority order:
+ *  1. `OPENCODE_GO_API_KEY` (Console API key)
+ *  2. `~/.local/share/opencode/auth.json` `opencode-go` entry with `type: "api"`
+ *  3. `OPENCODE_GO_AUTH_COOKIE` (legacy browser cookie for the HTML console page)
+ *
+ * Credential values are never logged here.
+ */
+export function getGoAuth(): GoAuth | null {
+  // 1. Explicit API key env var (preferred — works against the JSON usage API).
+  // Trim first so a whitespace-only value is rejected rather than sent as a key.
+  const apiKey = process.env.OPENCODE_GO_API_KEY?.trim()
+  if (apiKey) return { type: "bearer", value: apiKey }
+
+  // 2. opencode auth.json (opencode-go api entry)
   try {
     const authPath = `${homedir()}/.local/share/opencode/auth.json`
     if (existsSync(authPath)) {
       const raw = readFileSync(authPath, "utf8")
       const auth = JSON.parse(raw)
-      const key = auth?.["opencode-go"]?.key
-      if (key && auth["opencode-go"]?.type === "api") {
-        return { type: "bearer", value: key }
+      const entry = auth?.["opencode-go"]
+      // Require both credential fields to be non-empty strings before use as a
+      // Bearer value. Trim so a whitespace-only key is rejected; meaningful key
+      // contents are otherwise preserved verbatim.
+      if (entry?.type === "api" && typeof entry?.key === "string") {
+        const key = entry.key.trim()
+        if (key.length > 0) return { type: "bearer", value: key }
       }
     }
   } catch {
-    // ignore
+    // ignore unreadable/malformed auth file
   }
 
-  const apiKey = process.env.OPENCODE_GO_API_KEY
-  if (apiKey) return { type: "bearer", value: apiKey }
+  // 3. Legacy browser auth cookie (HTML scrape fallback only). Trim so a
+  // whitespace-only cookie is rejected rather than used as auth.
+  const cookie = process.env.OPENCODE_GO_AUTH_COOKIE?.trim()
+  if (cookie) return { type: "cookie", value: cookie }
 
   return null
 }
 
-export async function fetchGoQuota(): Promise<GoQuotaInfo | null> {
+/** Coerce a usage percent; returns null for missing/non-finite/out-of-range values. */
+function parsePercent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 100) return null
+  return value
+}
+
+/**
+ * Convert an ISO reset timestamp into seconds-from-now, clamped to >= 0.
+ * Returns null when `resetsAt` is missing or not a parseable date — callers
+ * treat that as a malformed window (fail closed) since the API contract
+ * requires a reset timestamp.
+ */
+function resetInSecFromIso(resetsAt: unknown): number | null {
+  if (typeof resetsAt !== "string") return null
+  const ts = Date.parse(resetsAt)
+  if (!Number.isFinite(ts)) return null
+  return Math.max(0, Math.round((ts - Date.now()) / 1000))
+}
+
+/** Window statuses the API contract considers valid. */
+const VALID_WINDOW_STATUSES = new Set(["ok", "rate-limited"])
+
+/**
+ * Accepts a window's `status`. Absent status is tolerated for legacy-like
+ * payloads; a present status must be one of the known-valid values so that a
+ * malformed/unknown status is never treated as a usable window.
+ */
+function isAcceptableStatus(status: unknown): boolean {
+  if (status === undefined) return true
+  return typeof status === "string" && VALID_WINDOW_STATUSES.has(status)
+}
+
+/**
+ * Parse a single `{ status, percent, resetsAt }` usage window into the
+ * dashboard's `GoQuotaBar`. Returns null when the window is missing, its
+ * status is malformed, its percent is out of range, or its reset timestamp is
+ * missing/invalid.
+ */
+function parseUsageWindow(raw: unknown): GoQuotaBar | null {
+  if (!raw || typeof raw !== "object") return null
+  const window = raw as { status?: unknown; percent?: unknown; resetsAt?: unknown }
+  if (!isAcceptableStatus(window.status)) return null
+  const usagePercent = parsePercent(window.percent)
+  if (usagePercent === null) return null
+  const resetInSec = resetInSecFromIso(window.resetsAt)
+  if (resetInSec === null) return null
+  return { usagePercent, resetInSec }
+}
+
+/** Fetch quota via the canonical JSON API using a Bearer console API key. */
+async function fetchGoQuotaViaApi(apiKey: string): Promise<GoQuotaInfo | null> {
+  try {
+    const response = await fetch(GO_USAGE_API_URL, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+        "User-Agent": "opencode-model-usage-plugin",
+      },
+    })
+
+    if (!response.ok) {
+      log("fetchGoQuota: usage API not ok, status:", response.status)
+      return null
+    }
+
+    const data = await response.json().catch(() => null)
+    const usage = (data as { usage?: unknown } | null)?.usage
+    if (!usage || typeof usage !== "object") {
+      log("fetchGoQuota: usage API response missing usage object")
+      return null
+    }
+
+    const record = usage as Record<string, unknown>
+    const info: GoQuotaInfo = {
+      rolling: parseUsageWindow(record.rolling),
+      weekly: parseUsageWindow(record.weekly),
+      monthly: parseUsageWindow(record.monthly),
+    }
+
+    if (!info.rolling && !info.weekly && !info.monthly) {
+      log("fetchGoQuota: usage API returned no usable windows")
+      return null
+    }
+
+    return info
+  } catch (err) {
+    log("fetchGoQuota: usage API error:", String(err))
+    return null
+  }
+}
+
+/**
+ * Cookie names commonly used for auth/session that should be treated as an
+ * already-formed `name=value` Cookie header rather than an opaque value.
+ * Compared case-insensitively.
+ */
+const COMMON_AUTH_COOKIE_NAMES = new Set([
+  "auth",
+  "session",
+  "sessionid",
+  "session_id",
+  "sid",
+  "token",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "jwt",
+  "csrf",
+  "csrf_token",
+  "xsrf-token",
+  "__session",
+  "__host-session",
+  "__secure-session",
+  "next-auth.session-token",
+])
+
+/** Matches a leading cookie `name=` pair (RFC 6265 cookie-name token chars). */
+const COOKIE_NAME_PAIR = /^([!#$%&'*+\-.^_`|~0-9A-Za-z]+)=/
+
+/** True when the value already looks like a Cookie header rather than a raw value. */
+function looksLikeCookieHeader(value: string): boolean {
+  // Multiple pairs are unambiguously a full Cookie header.
+  if (value.includes(";")) return true
+  // A single `name=value` pair counts only for known auth/session names, so that
+  // base64 value-only cookies (e.g. `dGVzdA==`) are not mistaken for a pair.
+  const match = value.match(COOKIE_NAME_PAIR)
+  return match !== null && COMMON_AUTH_COOKIE_NAMES.has(match[1].toLowerCase())
+}
+
+/**
+ * Normalize a cookie value into a Cookie header. Accepts either a full header
+ * (e.g. `auth=...; other=...` or a single `session=...` pair) or a value-only
+ * auth cookie (including base64 values with `=` padding).
+ */
+function buildCookieHeader(cookieValue: string): string {
+  const trimmed = cookieValue.trim()
+  if (looksLikeCookieHeader(trimmed)) {
+    return trimmed
+  }
+  return `auth=${trimmed}`
+}
+
+/** Heuristic for a login/redirect landing page returned instead of real quota HTML. */
+function looksLikeLoginPage(html: string): boolean {
+  return (
+    /<title>[^<]*(sign\s*in|log\s*in|login)/i.test(html) ||
+    /Continue with (Google|GitHub)/i.test(html) ||
+    /name=["']?signin/i.test(html)
+  )
+}
+
+/** Legacy fallback: scrape the workspace Go console page with a browser cookie. */
+async function fetchGoQuotaViaCookie(cookieValue: string): Promise<GoQuotaInfo | null> {
   const workspaceId = process.env.OPENCODE_GO_WORKSPACE_ID
-  if (!workspaceId) return null
-
-  const auth = getGoAuth()
-  if (!auth) return null
-
-  const patterns = {
-    rolling: /rollingUsage:\$R\[\d+\]=(\{[^}]+\})/,
-    weekly: /weeklyUsage:\$R\[\d+\]=(\{[^}]+\})/,
-    monthly: /monthlyUsage:\$R\[\d+\]=(\{[^}]+\})/,
+  if (!workspaceId) {
+    log("fetchGoQuota: legacy cookie auth requires OPENCODE_GO_WORKSPACE_ID")
+    return null
   }
 
   try {
-    const headers: Record<string, string> = {
-      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-      Accept: "text/html,application/xhtml+xml",
-    }
-    if (auth.type === "bearer") {
-      headers["Authorization"] = `Bearer ${auth.value}`
-    } else {
-      headers["Cookie"] = `auth=${auth.value}`
-    }
+    const response = await fetch(`${GO_LEGACY_WORKSPACE_URL}/${encodeURIComponent(workspaceId)}/go`, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        Accept: "text/html,application/xhtml+xml",
+        Cookie: buildCookieHeader(cookieValue),
+      },
+      // Do not follow redirects — a redirect means we were bounced to login.
+      redirect: "manual",
+    })
 
-    const response = await fetch(
-      `https://opencode.ai/workspace/${encodeURIComponent(workspaceId)}/go`,
-      { headers },
-    )
-
-    if (!response.ok) return null
+    if (response.status >= 300 && response.status < 400) {
+      log("fetchGoQuota: legacy page redirected (likely login), status:", response.status)
+      return null
+    }
+    if (!response.ok) {
+      log("fetchGoQuota: legacy page not ok, status:", response.status)
+      return null
+    }
 
     const html = await response.text()
-    const usage: GoQuotaInfo = { rolling: null, weekly: null, monthly: null }
+    if (looksLikeLoginPage(html)) {
+      log("fetchGoQuota: legacy page looks like a login page")
+      return null
+    }
 
-    for (const [key, pattern] of Object.entries(patterns)) {
+    const info: GoQuotaInfo = { rolling: null, weekly: null, monthly: null }
+    for (const [key, pattern] of Object.entries(LEGACY_QUOTA_PATTERNS) as Array<[keyof GoQuotaInfo, RegExp]>) {
       const match = html.match(pattern)
-      if (match) {
-        try {
-          const jsonStr = match[1].replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
-          usage[key as keyof GoQuotaInfo] = JSON.parse(jsonStr)
-        } catch {
-          // ignore individual parse failures
-        }
+      if (!match) continue
+      try {
+        const jsonStr = match[1].replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
+        const parsed = JSON.parse(jsonStr) as { status?: unknown; usagePercent?: unknown; resetInSec?: unknown }
+        if (!isAcceptableStatus(parsed?.status)) continue
+        const usagePercent = parsePercent(parsed?.usagePercent)
+        if (usagePercent === null) continue
+        // Fail closed on a malformed reset: a missing, non-numeric, or
+        // non-finite `resetInSec` discards the window rather than defaulting to
+        // 0, matching the canonical API path. A valid 0 is preserved.
+        const rawResetInSec = parsed?.resetInSec
+        if (typeof rawResetInSec !== "number" || !Number.isFinite(rawResetInSec)) continue
+        info[key] = { usagePercent, resetInSec: Math.max(0, Math.round(rawResetInSec)) }
+      } catch {
+        // ignore individual parse failures
       }
     }
 
-    return usage
-  } catch {
+    if (!info.rolling && !info.weekly && !info.monthly) {
+      log("fetchGoQuota: legacy page contained no parseable quota")
+      return null
+    }
+
+    return info
+  } catch (err) {
+    log("fetchGoQuota: legacy fetch error:", String(err))
     return null
   }
+}
+
+export async function fetchGoQuota(): Promise<GoQuotaInfo | null> {
+  const auth = getGoAuth()
+  if (!auth) {
+    log("fetchGoQuota: no Go credentials configured")
+    return null
+  }
+
+  if (auth.type === "bearer") {
+    return fetchGoQuotaViaApi(auth.value)
+  }
+
+  // Cookie auth is only used when no Bearer key is available.
+  return fetchGoQuotaViaCookie(auth.value)
 }
 
 export async function fetchQuotaInfo(token: string): Promise<CopilotQuotaInfo | null> {

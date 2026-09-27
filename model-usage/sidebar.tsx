@@ -2,7 +2,7 @@
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { AssistantMessage, Message, EventMessageUpdated, EventSessionCompacted, EventSessionCreated } from "@opencode-ai/sdk/v2"
 import { createSignal, createEffect, createMemo, onCleanup } from "solid-js"
-import type { CopilotQuotaInfo, GoQuotaInfo } from "./types"
+import type { CopilotQuotaInfo, GoQuotaBar, GoQuotaInfo } from "./types"
 import { log as logFn, DEBUG, logPath } from "./helpers/debug"
 import { isCopilotModel, isOpencodeGoModel, resolveActiveModel, buildUsageHeaderLabel, type ActiveModelInfo } from "./helpers/model"
 import { buildProgressBar, getUsageColor, getQuotaLabel, formatDuration } from "./helpers/format"
@@ -11,7 +11,7 @@ import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
 import { getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "./helpers/dates"
 import { appendFileSync } from "node:fs"
 import { createLoadGuard } from "./wlib/src/core/reload"
-import { fetchQuotaInfo, fetchGoQuota, withGuard } from "./quota"
+import { fetchQuotaInfo, fetchGoQuota, getGoAuth, withGuard } from "./quota"
 import { resolveThemeColors } from "./wlib/src/core/theme"
 import { PLUGIN_VERSION } from "./version"
 
@@ -284,10 +284,38 @@ function renderProjectionLine(usedPct: number, muted: string) {
   return proj ? <text fg={proj.pct > 100 ? "#ef4444" : "#22c55e"}>{Math.round(proj.pct)}% projected by {endLabel}</text> : null
 }
 
+/**
+ * Render a single Go quota window. A missing window (null bar) is shown as
+ * explicitly unavailable — never as a fake `0%` with an empty bar. A present
+ * window with a legitimate 0% is rendered normally.
+ */
+function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: string }) {
+  if (!props.bar) {
+    return (
+      <>
+        <text fg={props.muted}>{props.label}</text>
+        <text fg="#888888">Unavailable</text>
+      </>
+    )
+  }
+  const color = getUsageColor(props.bar.usagePercent)
+  return (
+    <>
+      <text fg={props.muted}>{props.label}</text>
+      <text fg={color}>
+        {props.bar.usagePercent}% · resets in {formatDuration(props.bar.resetInSec)}
+      </text>
+      <text fg={color}>{buildProgressBar(props.bar.usagePercent)}</text>
+    </>
+  )
+}
+
 function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
   log("UsageSidebar: rendering! session_id:", props.session_id)
   const githubToken = process.env.GITHUB_TOKEN ?? ""
   const hasToken = !!githubToken
+  // Whether any Go credential source is available (env key, auth.json, or legacy cookie).
+  const hasGoAuth = getGoAuth() !== null
 
   const [activeModel, setActiveModel] = createSignal<string | null>(null)
 
@@ -552,42 +580,20 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
               {!goQuota() && goQuotaLoading() ? (
                 <text fg="#888888">Loading...</text>
               ) : goQuota() ? (
-                /* If all three bars are null or at 0%, the web page couldn't authenticate */
-                (goQuota()!.rolling?.usagePercent ?? 0) === 0 &&
-                (goQuota()!.weekly?.usagePercent ?? 0) === 0 &&
-                (goQuota()!.monthly?.usagePercent ?? 0) === 0 ? (
-                  <box flexDirection="column" gap={0}>
-                    <text fg="#eab308">⚠ Unable to fetch Go quota</text>
-                    <text fg={muted}>Set OPENCODE_GO_AUTH_COOKIE with your browser's auth cookie</text>
-                  </box>
-                ) : (
-                  <box flexDirection="column" gap={0}>
-                    <text fg={muted}>Rolling (5h)</text>
-                    <text fg={getUsageColor(goQuota()!.rolling?.usagePercent ?? 0)}>
-                      {goQuota()!.rolling?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.rolling?.resetInSec ?? 0)}
-                    </text>
-                    <text fg={getUsageColor(goQuota()!.rolling?.usagePercent ?? 0)}>
-                      {buildProgressBar(goQuota()!.rolling?.usagePercent ?? 0)}
-                    </text>
-                    <text fg={muted}>Weekly</text>
-                    <text fg={getUsageColor(goQuota()!.weekly?.usagePercent ?? 0)}>
-                      {goQuota()!.weekly?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.weekly?.resetInSec ?? 0)}
-                    </text>
-                    <text fg={getUsageColor(goQuota()!.weekly?.usagePercent ?? 0)}>
-                      {buildProgressBar(goQuota()!.weekly?.usagePercent ?? 0)}
-                    </text>
-                    <text fg={muted}>Monthly</text>
-                    <text fg={getUsageColor(goQuota()!.monthly?.usagePercent ?? 0)}>
-                      {goQuota()!.monthly?.usagePercent ?? 0}% · resets in {formatDuration(goQuota()!.monthly?.resetInSec ?? 0)}
-                    </text>
-                    <text fg={getUsageColor(goQuota()!.monthly?.usagePercent ?? 0)}>
-                      {buildProgressBar(goQuota()!.monthly?.usagePercent ?? 0)}
-                    </text>
-                    {renderProjectionLine(goQuota()!.monthly?.usagePercent ?? 0, muted)}
-                  </box>
-                )
+                <box flexDirection="column" gap={0}>
+                  <GoQuotaWindow label="Rolling (5h)" bar={goQuota()!.rolling} muted={muted} />
+                  <GoQuotaWindow label="Weekly" bar={goQuota()!.weekly} muted={muted} />
+                  <GoQuotaWindow label="Monthly" bar={goQuota()!.monthly} muted={muted} />
+                  {goQuota()!.monthly ? renderProjectionLine(goQuota()!.monthly!.usagePercent, muted) : null}
+                </box>
               ) : (
-                <text fg="#888888">Set OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE for Go quota</text>
+                <box flexDirection="column" gap={0}>
+                  <text fg="#888888">
+                    {hasGoAuth ? "Unable to fetch Go quota" : "No Go credentials configured"}
+                  </text>
+                  <text fg={muted}>Set OPENCODE_GO_API_KEY (or run opencode auth)</text>
+                  <text fg={muted}>Legacy: OPENCODE_GO_AUTH_COOKIE + OPENCODE_GO_WORKSPACE_ID</text>
+                </box>
               )}
             </>
           ) : null}
