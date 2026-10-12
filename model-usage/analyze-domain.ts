@@ -14,7 +14,34 @@ import { splitSystemFragments } from "./helpers/fragments"
 import { loadBaseline } from "./db"
 import { readSystemSnapshot } from "./wlib/src/core/system"
 import type { SystemFragment, SystemSnapshot, SystemSource, ToolDefSnapshot } from "./types"
-import type { Message, Part } from "@opencode-ai/sdk/v2"
+
+/**
+ * Structural message shapes this domain consumes. Kept local (rather than the
+ * SDK types) so the domain stays host/version independent: the v2 TUI feeds it
+ * output from `v2/message-adapter.ts`; tests feed plain literal objects.
+ */
+export interface AnalyzeMessageInfo {
+  role: string
+  providerID?: string
+  modelID?: string
+  tokens?: {
+    input?: number
+    output?: number
+    reasoning?: number
+    cache?: { read?: number; write?: number }
+  }
+  cost?: number
+}
+
+export interface AnalyzePart {
+  type: string
+}
+
+export interface AnalyzeMessage {
+  id?: string
+  info: AnalyzeMessageInfo
+  parts: AnalyzePart[]
+}
 
 export interface CategoryEntry {
   label: string
@@ -143,7 +170,7 @@ export function loadBaselineTokens(sessionID: string): number | null {
 // PURE function: takes immutable inputs, returns AnalysisData.
 // Does NOT set any SolidJS signals or access the TUI plugin API.
 export function analyzeSessionMessages(
-  messages: Array<{ id?: string; info: Message; parts: Part[] }>,
+  messages: readonly AnalyzeMessage[],
   currentSessionID: string,
   serverSnapshot: SystemSnapshot | null,
   baselineTokens: number | null,
@@ -219,7 +246,7 @@ export function analyzeSessionMessages(
   log("analyze: baselineTokens (Tier 1) =", baselineTokens)
 
   for (const msg of messages) {
-    const info = msg.info as Message
+    const info = msg.info
     if (info.role !== "assistant" && info.role !== "user") continue
     const parts: any[] = (msg.parts ?? []) as any[]
     const msgId = msg.id ?? (info as any)?.id

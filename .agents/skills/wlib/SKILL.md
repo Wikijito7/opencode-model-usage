@@ -14,41 +14,60 @@ description: "CRITICAL: Load when needing shared functionality or touching the w
 
 ---
 
-## What wlib provides (`model-usage/wlib/`)
+## Host adapters (v1 / v2) — MUST
+
+wlib talks to the host through a single `WlibHost` contract
+(`wlib/src/host/types.ts`); command/keymap, dialog, theme and renderer helpers
+take a `WlibHost`, never a raw plugin API.
+
+| Generation | Factory | Import | Status |
+|---|---|---|---|
+| v2 | `createV2Host(context)` | `model-usage/wlib/src/host/v2` | **Supported (production)** |
+| v1 | `createV1Host(api)` | `model-usage/wlib/src/host/v1` | **Deprecated** — transition only |
+
+**Policy:** create exactly one host per entrypoint and never mix v1 and v2 in
+one runtime adapter.
+
+## What wlib provides (`model-usage/wlib/src/`)
+
+All modules live under `src/core` (pure/host-agnostic) or `src/ui` (SolidJS).
 
 | Module | Provides |
 |--------|----------|
-| `system` | `writeSystemSnapshot` / `readSystemSnapshot` (final system sidecar), `isTitleGenerator`, `estimateTokens` |
-| `scroll` | `makeScrollState` (up/down/page, overflow tracking) |
-| `keys` | `registerDialogKeyLayer` |
-| `theme` | `resolveThemeColors` (RGBA-aware palette) |
-| `log` | `createLog` (debug-gated file logging) |
-| `reload` | `createLoadGuard` (stale-fetch guard) |
-| `clipboard` | `writeClipboard` (+ candidate resolution, OSC 52) |
-| `command` | `registerSlashCommand` |
-| `dialog` | `useDialogSizing`, `DialogShell` (entry is `dialog.tsx`; pure math in `dialog-fit.ts`) |
-| `export` | `ExportFormat`, `ExportFormatOption`, `EXPORT_FORMATS`, `Exportable` (the generic export contract) |
-| `export-controller` | `createExportController` (owns the export flow: overlay state, key handling, temp `priority: 2` `enter` layer, clipboard write, `copied!` flash signal + `onCopied` event) |
-| `export-overlay` | `ExportOverlay` (presentational format-picker popup) |
-| `copied-flash` | `CopiedFlash` (presentational `hint` ↔ `copied!` toggler) |
+| `core/system` | `writeSystemSnapshot` / `readSystemSnapshot` (final system sidecar), `isTitleGenerator`, `estimateTokens` |
+| `core/scroll` | `makeScrollState` (up/down/page, overflow tracking) |
+| `core/keys` | `registerDialogKeyLayer(host, config)` |
+| `core/theme` | `resolveThemeColors` (v1/loose), `resolveSemanticTheme` (v2 semantic tokens) |
+| `core/log` | `createLog` (debug-gated file logging) |
+| `core/reload` | `createLoadGuard` (stale-fetch guard) |
+| `core/clipboard` | `writeClipboard` (+ candidate resolution, OSC 52) |
+| `core/command` | `registerSlashCommand(host, opts)` |
+| `core/dialog-fit` | `resolveDialogFit` (pure sizing math) |
+| `ui/dialog` | `useDialogSizing(host, desired)`, `DialogShell` |
+| `core/export` | `ExportFormat`, `ExportFormatOption`, `EXPORT_FORMATS`, `Exportable` (the generic export contract) |
+| `ui/export-controller` | `createExportController(host, exportable, opts)` (owns the export flow) |
+| `ui/export-overlay`, `ui/export-result-overlay` | presentational export popups |
+| `ui/help-overlay` | `HelpOverlay` popup |
+| `ui/copied-flash` | `CopiedFlash` (presentational `hint` ↔ `copied!` toggler) |
 
 ## Export foundation (reference)
 
 The `export` module is the generic export CONTRACT, not any feature's serializers:
 - `Exportable { formats: ExportFormatOption[]; build(format: ExportFormat): string }` — the interface each feature implements.
-- `createExportController(api, exportable)` — the reusable controller that owns overlay state, key handling, the temporary `priority: 2` `enter` layer, clipboard write, and the `copied!` flash (`copiedFlash()` signal + `onCopied(listener)` event).
+- `createExportController(host, exportable, opts)` — the reusable controller that owns overlay state, key handling, the temporary `priority: 2` key layer, clipboard/file writes, and the `copied!` flash (`copiedFlash()` signal + `onCopied(listener)` event).
 - `EXPORT_FORMATS` — the canonical four formats (Markdown/CSV/JSON/plain text).
 
 Feature-specific serializers (usage, analyze, …) live in the consuming plugin, not here — e.g. `opencode-model-usage/model-usage/helpers/export/usage.ts`.
 
 ## Import rules (MUST)
 
-- Import directly: `import { x } from "./wlib/<module>"` — never `export { x } from "./wlib/<module>"`. The plugin runtime transpiler **drops re-exports** and the names end up undefined.
+- Import directly: `import { x } from "./wlib/src/core/<module>"` (or `src/ui/...`) — never `export { x } from "./wlib/..."`. The plugin runtime transpiler **drops re-exports** and the names end up undefined.
 - Never create a sibling file with the same base name (`.ts` vs `.tsx`) — host resolution may pick the wrong one.
 - For theme colors: values are `ThemeColorValue` (`string | RGBA`) — pass objects through, never string-coerce.
 
 ## Submodule upkeep
 
+- Current pin: `e91baf2877bf19c27f70a1c817f1348ccd3f5353` (canonical v2 foundation — `WlibHost` + `src/host/{v1,v2}`).
 - Bump: `git submodule update --remote --merge` at repo root, then commit the pointer change.
 - If the submodule working tree is dirty and the merge refuses: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib reset --hard origin/main` (only after confirming no local work).
 - Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).
@@ -57,6 +76,7 @@ Feature-specific serializers (usage, analyze, …) live in the consuming plugin,
 ## Blockers (MUST NOT)
 
 - Duplicating wlib functionality locally (scroll/keys/theme/log/reload/clipboard/dialog/system/export/export-overlay) — the old `shared/` folder is gone for a reason
+- Mixing `createV1Host` and `createV2Host` in one runtime adapter
 - Re-export patterns from wlib modules
 - Committing a submodule bump without the deployed copy in sync
 

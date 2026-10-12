@@ -1,5 +1,14 @@
 /** @jsxImportSource @opentui/solid */
+/**
+ * DEPRECATED — OpenCode v1 `/usage` dialog.
+ *
+ * Retained for the transition window only; the supported path is the v2 dialog
+ * in `./v2/usage.tsx` (OpenCode 2.0.27). This module uses the v1 `TuiPluginApi`
+ * plus the deprecated `createV1Host` wlib adapter and must never be loaded by
+ * the v2 runtime.
+ */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { WlibHost } from "./wlib/src/host/types"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { Database } from "bun:sqlite"
@@ -29,7 +38,7 @@ import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonth
 import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries, modelCacheKey, prefetchTarget } from "./usage-domain"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
-export function registerUsageCommand(api: TuiPluginApi) {
+export function registerUsageCommand(api: TuiPluginApi, host: WlibHost) {
   api.keymap.registerLayer({
     commands: [
       {
@@ -558,7 +567,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             if (key === "enter" && sessionView()) {
               const list = topSessions()
               const s = list[selectedSessionIdx()]
-              if (s) openAnalyze(api, s.id)
+              if (s) openAnalyze(api, host, s.id)
               return true
             }
             if (key === "up" && sessionView()) {
@@ -592,9 +601,9 @@ export function registerUsageCommand(api: TuiPluginApi) {
             // The export controller must be created inside this Solid owner so its
             // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
             // disposed when the dialog closes.
-            exporter = createExportController(api, exportable, { name: "usage" })
+            exporter = createExportController(host, exportable, { name: "usage" })
             // Desired large/40 — falls back to fit the terminal (never cut off).
-            const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
+            const dialogSizing = useDialogSizing(host, { size: "large", maxHeight: 40 })
             log(
               "[mu:usage] dialog open",
               `renderer=${api.renderer ? "present" : "missing"}`,
@@ -639,7 +648,7 @@ export function registerUsageCommand(api: TuiPluginApi) {
             // is owned by the shared export controller now.
 
             onMount(() => {
-              cleanupKeyLayer = registerDialogKeyLayer(api, {
+              cleanupKeyLayer = registerDialogKeyLayer(host, {
                 priority: 1,
                 bindings: usageBindings,
                 commands: [

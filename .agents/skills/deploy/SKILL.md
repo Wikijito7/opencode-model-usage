@@ -16,12 +16,22 @@ description: "CRITICAL: Load when syncing repo changes to the live opencode plug
 
 ## Layout
 
-| Source (repo) | Live destination |
-|---|---|
-| `model-usage.tsx` | `~/.config/opencode/plugins/model-usage.tsx` |
-| `model-usage-server.ts` | `~/.config/opencode/plugins/model-usage-server.ts` |
-| `model-usage/` (dir) | `~/.config/opencode/plugins/model-usage/` |
-| `tests/`, `.agents/`, `README.md`, `tsconfig.json` | NOT synced |
+**v2 (supported, OpenCode 2.0.27):** OpenCode discovers each directory under
+`plugins/` as one plugin and resolves its `server` / `tui` entrypoints. Deploy
+the `model-usage/` tree to `~/.config/opencode/plugins/model-usage/`; its
+`server.ts` + `tui.tsx` are picked up automatically. Do **not** copy the loose
+v1 entry files into `plugins/` for a v2 install — but note discovery only admits
+directories, so loose files are ignored anyway.
+
+**v1 (deprecated transition):** the legacy layout below (loose `model-usage.tsx` /
+`model-usage-server.ts` + `model-usage/` dir registered via `tui.json`).
+
+| Source (repo) | v1 live destination | v2 live destination |
+|---|---|---|
+| `model-usage/` (dir, incl. `server.ts` + `tui.tsx`) | `~/.config/opencode/plugins/model-usage/` | `~/.config/opencode/plugins/model-usage/` |
+| `model-usage.tsx` | `~/.config/opencode/plugins/model-usage.tsx` | NOT copied |
+| `model-usage-server.ts` | `~/.config/opencode/plugins/model-usage-server.ts` | NOT copied |
+| `tests/`, `.agents/`, `README.md`, `docs/`, `tsconfig.json` | NOT synced | NOT synced |
 
 ## Rules (MUST)
 - Only productive code ships. Tests (`*.test.ts`, `tests/`) MUST NOT be copied.

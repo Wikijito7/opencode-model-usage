@@ -2,10 +2,60 @@
 
 OpenCode plugin that tracks and visualises model usage, token consumption, and costs across sessions.
 
+## OpenCode v2 (2.0.27) — supported path
+
+The supported implementation targets **OpenCode 2.0.27** (`@opencode/plugin`) and
+lives in the `model-usage/` plugin directory:
+
+| Concern | v2 (supported) | v1 (deprecated) |
+|---|---|---|
+| Server entry | `model-usage/server.ts` — `Plugin.define({ id, setup })`, `session.hook("context")` | `model-usage-server.ts` — hook map (`experimental.chat.system.transform`, `tool.definition`) |
+| TUI entry | `model-usage/tui.tsx` — `Plugin.define({ id, setup })`, `createV2Host` | `model-usage.tsx` — `TuiPlugin` + `createV1Host` |
+| Dialogs | `model-usage/v2/{usage,analyze,sidebar}.tsx` | `model-usage/{usage,analyze,sidebar}.tsx` |
+| Host adapter | `createV2Host` (`wlib/src/host/v2`) | `createV1Host` (`wlib/src/host/v1`) |
+
+**Never mix the two host APIs in one adapter.** v2 modules import only the v2
+adapter and v2 APIs; v1 modules import only the v1 adapter and the raw
+`TuiPluginApi`.
+
+### Deployment layout (selection)
+
+- **v2:** deploy the `model-usage/` directory to
+  `~/.config/opencode/plugins/model-usage/`. OpenCode 2.0.27 auto-discovers each
+  subdirectory of `plugins/` as one plugin and resolves its `server` and `tui`
+  entrypoints — so `model-usage/server.ts` and `model-usage/tui.tsx` are loaded.
+  Loose files (including the deprecated `model-usage.tsx` /
+  `model-usage-server.ts`) and the `v2/` / `v1`-era source modules are **not**
+  entrypoints and are never auto-loaded.
+- **v1:** register `~/.config/opencode/plugins/model-usage.tsx` in `tui.json`
+  and place `model-usage-server.ts` + the `model-usage/` tree alongside it
+  (the legacy layout). See `.agents/skills/deploy`.
+
+The two layouts can coexist on disk; the runtime picks its own entrypoints.
+
+### Data backend strategy
+
+The v2 data/client API is current-session scoped and is the **preferred** source
+where it can answer the query:
+
+- `/analyze` reads session messages from `context.data.session.message.list` and
+  maps them (`model-usage/v2/message-adapter.ts`) into the pure `analyze-domain`.
+- The sidebar aggregates session token/cost from `context.data` via the pure
+  `model-usage/v2/sidebar-domain.ts`.
+
+It does **not** expose historical per-model usage across arbitrary periods, which
+`/usage` needs. That feature **retains a read-only SQLite fallback**
+(`model-usage/db.ts`, selected by `model-usage/v2/backend.ts`) with explicit
+degradation when no database is present. The retained fallback and other
+unsupported/unstable areas are documented in
+`docs/opencode-v1-to-v2-migration.md`.
+
 ## Features
 
-### Server (`model-usage-server.ts`)
-Hooks `experimental.chat.system.transform` to capture a pre-mutation server snapshot of the system prompt on every main-chat call (skipping title-generator fires); the persona-injector sidecar can provide the final override. Also hooks `tool.definition` to capture each tool's definition fields, reconstructing the definition text from the captured `toolID`/`description`/`parameters` (no title-generator guard). Both re-measure on each qualifying call (keeps the latest — the system can grow mid-session as refs/MCP/skills load), though system snapshots may skip persistence when drift is ≤32 tokens; per-fragment char/4 breakdowns plus the raw text persist to `system-tokens.json` and `tool-defs.json` (FIFO-capped at 1000 entries). Used by `/analyze` for the System Breakdown and Tool Defs rows.
+### Server (`model-usage/server.ts` — v2; `model-usage-server.ts` — deprecated v1)
+On OpenCode 2.0.27 the server hooks `session.hook("context")`, which fires for the primary agent loop immediately before provider dispatch and carries **both** the assembled system parts (`event.system: SystemPart[]`) and the effective tool definitions (`event.tools`). This captures a pre-mutation server snapshot of the system prompt; the persona-injector sidecar can provide the final override. Title generation uses a separate hook, so it is structurally excluded (with a defensive title-generator guard retained). Both sequences re-measure on each qualifying call (keeps the latest — the system can grow mid-session as refs/MCP/skills load), though system snapshots may skip persistence when drift is ≤32 tokens; per-fragment char/4 breakdowns plus the raw text persist to `system-tokens.json` and `tool-defs.json` (FIFO-capped at 1000 entries). Used by `/analyze` for the System Breakdown and Tool Defs rows.
+
+The deprecated v1 server (`model-usage-server.ts`) is unchanged and uses the v1 `experimental.chat.system.transform` + `tool.definition` hooks.
 
 ### Sidebar
 Cost estimation (price-weighted input/output split from API) plus provider-specific quota:
@@ -79,53 +129,54 @@ Set `OPENCODE_COPILOT_DEBUG=true` to enable plugin debug logs (written to `model
 ## Structure
 
 ```
-model-usage/
-├── model-usage.tsx                   # TUI entry point
-├── model-usage-server.ts             # Server entry point (system prompt + tool def capture)
-├── model-usage/
-│   ├── analyze-domain.ts             # Per-session message analysis
-│   ├── analyze.tsx                   # /analyze dialog
-│   ├── cache.ts                      # Persistent month/week/day cache
-│   ├── db.ts                         # SQLite query layer
-│   ├── quota.ts                      # Copilot + opencode-go quota
-│   ├── sidebar.tsx                   # Usage sidebar widget
-│   ├── types.ts                      # Type definitions
-│   ├── usage-domain.ts               # Usage data domain logic
+model-usage/                          # v2 plugin directory (deploy → ~/.config/opencode/plugins/model-usage/)
+├── server.ts                         # v2 server entry (Plugin.define + session.hook("context"))
+├── tui.tsx                           # v2 TUI entry (Plugin.define + createV2Host + slots/commands)
+├── v2/                               # v2 TUI implementation (host API 2.0.27)
+│   ├── sidebar.tsx                   # Usage sidebar widget (context.data)
 │   ├── usage.tsx                     # /usage dialog
-│   ├── version.ts                    # Plugin name + version
-│   ├── helpers/                      # Utility modules
-│   │   ├── compaction.ts             # Compaction delta estimation
-│   │   ├── cost.ts                   # Cost formatting
-│   │   ├── dates.ts                  # Date utilities
-│   │   ├── debug.ts                  # Debug logging
-│   │   ├── export/                   # Export serializers
-│   │   │   ├── usage.ts              # /usage export (Markdown/CSV/JSON/text)
-│   │   │   └── analyze.ts            # /analyze export (Markdown/JSON/text)
-│   │   ├── format.ts                 # Token formatting
-│   │   ├── fragments.ts             # System prompt fragment splitting
-│   │   ├── hotspots.ts              # Unusually large message detection
-│   │   ├── model-tab.ts             # Model comparison tab
-│   │   ├── model.ts                  # Model definitions
-│   │   ├── models.ts                # Per-model usage breakdown
-│   │   ├── projection.ts            # Month-end cost projection
-│   │   └── tokens.ts                # Token estimation (char/4)
-│   ├── wlib/                         # Shared helper submodule (git submodule)
-│   │   ├── clipboard.ts              # Raw text copy to clipboard
-│   │   ├── command.ts                # Palette slash command registration
-│   │   ├── copied-flash.tsx          # "Copied!" footer flash
-│   │   ├── dialog-fit.ts             # Responsive dialog fit sizing (pure)
-│   │   ├── dialog.tsx                # Responsive dialog sizing + dialog frame
-│   │   ├── export.ts                 # Export contract (formats + Exportable)
-│   │   ├── export-controller.tsx     # Reusable export controller + overlay key layer
-│   │   ├── export-overlay.tsx        # Format picker overlay
-│   │   ├── export-state.ts           # Export overlay state machine (pure)
-│   │   ├── help.ts                   # Help overlay row builder
-│   │   ├── help-overlay.tsx          # Help overlay dialog
-│   │   ├── keys.ts                   # Dialog-scoped key layer registration
-│   │   ├── log.ts                    # Unified debug logging
-│   │   ├── reload.ts                 # Stale-fetch guard
-│   │   ├── scroll.ts                 # Scroll state for scrollbox dialogs
-│   │   ├── system.ts                 # System prompt snapshot contract
-│   │   └── theme.ts                  # Normalized theme palette
-└── tests/                            # Unit tests (tests/model-usage/*.test.ts)
+│   ├── analyze.tsx                   # /analyze dialog
+│   ├── backend.ts                    # Historical-usage backend strategy (pure)
+│   ├── message-adapter.ts            # v2 SessionMessageInfo → legacy shape (pure)
+│   └── sidebar-domain.ts             # Sidebar token/cost aggregation (pure)
+│
+├── analyze-domain.ts                 # Per-session message analysis (pure)
+├── analyze.tsx                       # DEPRECATED v1 /analyze dialog
+├── cache.ts                          # Persistent month/week/day cache
+├── db.ts                             # SQLite query layer (retained historical fallback)
+├── quota.ts                          # Copilot + opencode-go quota
+├── sidebar.tsx                       # DEPRECATED v1 sidebar widget
+├── types.ts                          # Type definitions
+├── usage-domain.ts                   # Usage data domain logic (pure)
+├── usage.tsx                         # DEPRECATED v1 /usage dialog
+├── version.ts                        # Plugin name + version
+├── helpers/                          # Pure utility modules
+│   ├── compaction.ts                 # Compaction delta estimation
+│   ├── cost.ts                       # Cost splitting / cache-hit rate
+│   ├── dates.ts                      # Date utilities
+│   ├── debug.ts                      # Debug logging
+│   ├── export/                       # Export serializers
+│   │   ├── usage.ts                  # /usage export (Markdown/CSV/JSON/text)
+│   │   └── analyze.ts                # /analyze export (Markdown/JSON/text)
+│   ├── format.ts                     # Token formatting
+│   ├── fragments.ts                  # System prompt fragment splitting
+│   ├── hotspots.ts                   # Unusually large message detection
+│   ├── model-tab.ts                  # Model comparison tab
+│   ├── model.ts                      # Model definitions
+│   ├── models.ts                     # Per-model usage breakdown
+│   ├── projection.ts                 # Month-end cost projection
+│   └── tokens.ts                     # Token estimation (char/4)
+└── wlib/                             # Shared helper submodule (git submodule)
+    └── src/
+        ├── core/                     # Pure + host-agnostic helpers (system, clipboard, scroll, keys, theme, log, reload, command, dialog-fit, file, open-folder, export, export-state, help)
+        ├── ui/                       # SolidJS/TUI components (dialog, copied-flash, export-controller, export-overlay, export-result-overlay, help-overlay)
+        └── host/                     # Host adapters: types.ts, v1.ts (deprecated), v2.ts (production)
+
+model-usage.tsx                       # DEPRECATED v1 TUI entry point
+model-usage-server.ts                 # DEPRECATED v1 server entry point
+tests/                                # Unit tests (tests/model-usage/*.test.ts)
 ```
+
+See `docs/opencode-v1-to-v2-migration.md` for the full migration record and
+`.agents/skills/plugin-development` for entrypoint/hook rules.
+

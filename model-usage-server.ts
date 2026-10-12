@@ -1,3 +1,11 @@
+/**
+ * DEPRECATED — OpenCode v1 server entrypoint.
+ *
+ * Retained for the transition window only. The supported production server
+ * entrypoint is `model-usage/server.ts` (OpenCode 2.0.27, `@opencode/plugin`).
+ * This file is a standalone v1 server source admitted by v1 auto-discovery; it
+ * is not part of the v2 plugin directory and is never loaded by v2.
+ */
 import { homedir } from "node:os"
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import type { Model } from "@opencode-ai/sdk/v2"
