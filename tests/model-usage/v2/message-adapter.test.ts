@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test"
-import { toLegacyMessages } from "@model-usage/v2/message-adapter"
+import { toLegacyMessages, mapFileAttachment } from "@model-usage/v2/message-adapter"
 
 // ─── toLegacyMessages: assistant mapping ─────────────────────────────────────
 
@@ -227,6 +227,38 @@ describe("toLegacyMessages", () => {
     expect(out[0].parts).toEqual([{ type: "file", source: "s" }])
   })
 
+  it("preserves a structured 2.0.27 PromptFileAttachment through toLegacyMessages", () => {
+    const out = toLegacyMessages([
+      {
+        type: "user",
+        text: "see attached",
+        files: [
+          {
+            source: { type: "uri", uri: "file:///tmp/report.pdf" },
+            data: "JVBERi0=",
+            mime: "application/pdf",
+            name: "report.pdf",
+            description: "Quarterly report",
+            mention: { text: "@report.pdf", start: 0, end: 12 },
+          },
+        ],
+      },
+    ])
+    expect(out[0].parts).toEqual([
+      { type: "text", text: "see attached" },
+      {
+        type: "file",
+        source: { type: "uri", uri: "file:///tmp/report.pdf" },
+        data: "JVBERi0=",
+        mime: "application/pdf",
+        filename: "report.pdf",
+        description: "Quarterly report",
+        mention: { text: "@report.pdf", start: 0, end: 12 },
+        text: "@report.pdf",
+      },
+    ])
+  })
+
   // ─── compaction + unknown message kinds ────────────────────────────────────
 
   it("maps a compaction message to a synthetic user message carrying a compaction part", () => {
@@ -258,5 +290,157 @@ describe("toLegacyMessages", () => {
       { type: "compaction", id: "c" },
     ])
     expect(out.map((m) => m.id)).toEqual(["u", "a", "c"])
+  })
+})
+
+// ─── mapFileAttachment: OpenCode 2.0.27 PromptFileAttachment ─────────────────
+
+describe("mapFileAttachment", () => {
+  it("preserves an inline source, data, mime and name and derives text from the name", () => {
+    expect(
+      mapFileAttachment({
+        source: { type: "inline" },
+        data: "aGVsbG8=",
+        mime: "text/plain",
+        name: "notes.txt",
+      }),
+    ).toEqual({
+      type: "file",
+      source: { type: "inline" },
+      data: "aGVsbG8=",
+      mime: "text/plain",
+      filename: "notes.txt",
+      text: "notes.txt",
+    })
+  })
+
+  it("preserves a URI source and derives text from the uri", () => {
+    const part = mapFileAttachment({ source: { type: "uri", uri: "file:///tmp/report.pdf" } })
+    expect(part).toEqual({
+      type: "file",
+      source: { type: "uri", uri: "file:///tmp/report.pdf" },
+      text: "file:///tmp/report.pdf",
+    })
+  })
+
+  it("prefers the mention text for the derived label and keeps the mention metadata", () => {
+    expect(
+      mapFileAttachment({
+        source: { type: "inline" },
+        data: "eA==",
+        mime: "image/png",
+        name: "diagram.png",
+        mention: { text: "@diagram.png", start: 3, end: 15 },
+      }),
+    ).toEqual({
+      type: "file",
+      source: { type: "inline" },
+      data: "eA==",
+      mime: "image/png",
+      filename: "diagram.png",
+      mention: { text: "@diagram.png", start: 3, end: 15 },
+      text: "@diagram.png",
+    })
+  })
+
+  it("treats data/mime alone as structured but derives no text label", () => {
+    expect(mapFileAttachment({ data: "abc", mime: "application/octet-stream" })).toEqual({
+      type: "file",
+      data: "abc",
+      mime: "application/octet-stream",
+    })
+  })
+
+  it("defaults a source without a string type to inline and keeps a string uri", () => {
+    expect(mapFileAttachment({ source: { uri: "file:///x" } })).toEqual({
+      type: "file",
+      source: { type: "inline", uri: "file:///x" },
+    })
+  })
+
+  it("preserves unknown/future members of a structured source through the round-trip", () => {
+    // Losslessness regression: an earlier revision reconstructed the source as
+    // `{ type, uri }` and silently dropped every other member. The adapter now
+    // spreads the raw source first, so unknown members survive verbatim.
+    expect(
+      mapFileAttachment({
+        source: { type: "uri", uri: "file:///a", extra: "keep", futureFlag: true },
+        mime: "text/plain",
+      }),
+    ).toEqual({
+      type: "file",
+      source: { type: "uri", uri: "file:///a", extra: "keep", futureFlag: true },
+      mime: "text/plain",
+      text: "file:///a",
+    })
+  })
+
+  it("preserves the attachment description alongside the structured fields", () => {
+    expect(
+      mapFileAttachment({
+        source: { type: "inline" },
+        data: "aGVsbG8=",
+        mime: "text/plain",
+        name: "notes.txt",
+        description: "Meeting notes",
+      }),
+    ).toEqual({
+      type: "file",
+      source: { type: "inline" },
+      data: "aGVsbG8=",
+      mime: "text/plain",
+      filename: "notes.txt",
+      description: "Meeting notes",
+      text: "notes.txt",
+    })
+  })
+
+  it("keeps a description on a data/mime-only attachment with no derived label", () => {
+    expect(mapFileAttachment({ data: "abc", mime: "application/octet-stream", description: "binary blob" })).toEqual({
+      type: "file",
+      data: "abc",
+      mime: "application/octet-stream",
+      description: "binary blob",
+    })
+  })
+
+  it("drops a description that arrives without any structured source/data/mime", () => {
+    // `description` alone does not make an attachment structured; it falls back
+    // to the legacy carrier path, which has no slot for it.
+    expect(mapFileAttachment({ description: "orphan" })).toEqual({ type: "file" })
+  })
+
+  it("keeps a mention's offsets even when its text is absent", () => {
+    expect(mapFileAttachment({ mime: "text/plain", mention: { start: 2, end: 5 } })).toEqual({
+      type: "file",
+      mime: "text/plain",
+      mention: { start: 2, end: 5 },
+    })
+  })
+
+  it("preserves the legacy string carrier with source > content > text > path > uri precedence", () => {
+    expect(mapFileAttachment({ uri: "u", path: "p", text: "t", content: "c", source: "s" })).toEqual({
+      type: "file",
+      source: "s",
+    })
+    expect(mapFileAttachment({ uri: "u" })).toEqual({ type: "file", source: "u" })
+    expect(mapFileAttachment({ path: "p" })).toEqual({ type: "file", source: "p" })
+  })
+
+  it("treats a string source as a legacy carrier, not a structured source", () => {
+    expect(mapFileAttachment({ source: "src/a.ts" })).toEqual({ type: "file", source: "src/a.ts" })
+  })
+
+  it("yields a bare file part for empty or non-string carriers", () => {
+    expect(mapFileAttachment({})).toEqual({ type: "file" })
+    expect(mapFileAttachment({ source: "" })).toEqual({ type: "file" })
+    expect(mapFileAttachment({ source: 7, content: 9 })).toEqual({ type: "file" })
+  })
+
+  it("returns null for non-object inputs", () => {
+    expect(mapFileAttachment(null)).toBeNull()
+    expect(mapFileAttachment(undefined)).toBeNull()
+    expect(mapFileAttachment(42)).toBeNull()
+    expect(mapFileAttachment("str")).toBeNull()
   })
 })

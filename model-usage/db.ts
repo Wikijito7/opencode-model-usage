@@ -338,26 +338,6 @@ export function getEarliestUsageDate(dbOrPath: Database | string): number | null
 }
 
 /**
- * Creates a time_created index on the `message` table if it does not exist.
- * Opens a READ-WRITE connection (the plugin otherwise reads the DB read-only),
- * wrapped so any failure (e.g. "database is locked") is non-fatal.
- * Idempotent: a no-op when the index already exists.
- */
-export function ensureMessageTimeIndex(dbPath: string): boolean {
-  let db: Database | null = null
-  try {
-    db = new Database(dbPath)
-    db.exec("PRAGMA busy_timeout = 3000")
-    db.exec("CREATE INDEX IF NOT EXISTS message_time_created_idx ON message(time_created)")
-    return true
-  } catch {
-    return false
-  } finally {
-    try { db?.close() } catch { /* ignore */ }
-  }
-}
-
-/**
  * Tier 1 system-token source: read the full assembled system baseline that the
  * V2 native runner persists to `session_context_epoch.baseline` on every turn
  * (written by `packages/core/src/session/context-epoch.ts`). Returns the raw

@@ -12,15 +12,13 @@
  * `/usage` aggregates historical per-model usage over arbitrary month/week/day
  * periods. The v2 data API is current-session scoped and does not expose this
  * aggregation, so the retained read-only SQLite fallback (`db.ts`) is used. The
- * backend choice is documented in `./data/backend` and degrades to an explicit
- * "unavailable" dialog when no database is present (never a silent break).
+ * backend choice, availability, and database opening live in `./backend`; this
+ * dialog degrades to an explicit "unavailable" view when no database is present
+ * (never a silent break) and never imports `bun:sqlite` itself.
  */
 
 import type { Plugin } from "@opencode/plugin/tui"
 import type { WlibHost } from "../wlib/src/host/types"
-import { existsSync } from "node:fs"
-import { homedir } from "node:os"
-import { Database } from "bun:sqlite"
 
 import { onMount, onCleanup, createSignal, createEffect, createMemo } from "solid-js"
 import { getMonthInfo, isCurrentMonth, getWeekMonday, getWeekInfo, computeMinOffsets, getDaysInMonth, getDayOfMonth } from "../helpers/dates"
@@ -28,7 +26,7 @@ import { resolveProjection } from "../helpers/projection"
 import { log } from "../helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "../helpers/format"
 import type { UsageData } from "../types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, queryTopSessions, type PeriodStats, type TopSession } from "../db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, fetchRootSessionTimestamps, queryTopSessions, type PeriodStats, type TopSession } from "../db"
 import { openAnalyze } from "./analyze"
 import { sortModels, costPerMillion, type ModelSortKey } from "../helpers/models"
 import { makeScrollState } from "../wlib/src/core/scroll"
@@ -42,7 +40,7 @@ import { CopiedFlash } from "../wlib/src/ui/copied-flash"
 import { buildExport, buildExportData, type ExportPeriod } from "../helpers/export/usage"
 import { useDialogSizing } from "../wlib/src/ui/dialog"
 import { toggleSessionSort, clampScrollTop } from "../helpers/session-sort"
-import { SQLITE_DB_PATH, SQLITE_FALLBACK_NOTE, isSqliteAvailable, selectUsageBackend } from "./backend"
+import { SQLITE_DB_PATH, SQLITE_FALLBACK_NOTE, sqliteDbStatus, selectUsageBackend, openUsageDatabase } from "./backend"
 
 import { MS_PER_DAY, CACHE_TTL_MS, PREFETCH_DELAY_MS, type CachePeriod, getMonthCache, flushDiskSave, updateMonthCache, getCachedEarliestTs, setCachedEarliestTs, getCachedMonths, findNullCountMonths } from "../cache"
 import { type Granularity, buildHierarchy, findPreviousPeriodTotal, computeTrendSeries, modelCacheKey, prefetchTarget } from "../usage-domain"
@@ -61,37 +59,48 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
       const { fg, muted, red, panel, primary } = host.theme()
 
       // Historical aggregation is only available from the retained SQLite
-      // fallback on 2.0.27; the v2 data API does not expose it.
-      const backend = selectUsageBackend({ hasV2History: false, hasSqlite: isSqliteAvailable(dbPath) })
-      log("[mu:usage] backend", backend, "-", SQLITE_FALLBACK_NOTE)
+      // fallback on 2.0.27; the v2 data API does not expose it. Availability
+      // and opening are owned by the backend boundary, not this dialog.
+      const dbStatus = sqliteDbStatus(dbPath)
+      const backend = selectUsageBackend({ hasV2History: false, hasSqlite: dbStatus === "available" })
+      log("[mu:usage] backend", backend, "dbStatus", dbStatus, "-", SQLITE_FALLBACK_NOTE)
 
-      if (!existsSync(dbPath)) {
+      if (backend !== "sqlite") {
+        // Distinguish a missing database from one that exists but is malformed
+        // or unreadable, so the empty state tells the truth instead of always
+        // blaming a missing file.
+        const reason =
+          dbStatus === "unreadable"
+            ? "The OpenCode database exists but could not be read (permissions or I/O error)."
+            : dbStatus === "malformed"
+              ? "The OpenCode database file exists but is not a valid SQLite database."
+              : "No OpenCode database was found at the expected location."
         host.dialog.show(() => (
           <box padding={2} flexDirection="column" gap={1}>
             <text fg={red}><b>Usage Data Unavailable</b></text>
-            <text fg={muted}>Database not found at the expected location.</text>
-            <text fg={muted}>Please try again later.</text>
+            <text fg={muted}>{reason}</text>
+            <text fg={muted}>{`Looked for: ${dbPath}`}</text>
           </box>
         ))
         host.dialog.set({ size: "medium" })
         return
       }
 
-      let db: Database | null = null
-      let cleanedUp = false
-      try {
-        db = new Database(dbPath, { readonly: true })
-      } catch (err) {
+      const { db: openedDb, error: openError } = openUsageDatabase(dbPath)
+      if (!openedDb) {
         host.dialog.show(() => (
           <box padding={2} flexDirection="column" gap={1}>
             <text fg={red}><b>Usage Data Unavailable</b></text>
             <text fg={muted}>Could not open database.</text>
-            <text fg={muted}>{err instanceof Error ? err.message : String(err)}</text>
+            <text fg={muted}>{openError ?? "Unknown error"}</text>
           </box>
         ))
         host.dialog.set({ size: "medium" })
         return
       }
+
+      let db = openedDb
+      let cleanedUp = false
 
       const cachedEarliest = getCachedEarliestTs()
       const initOffsets = computeMinOffsets(cachedEarliest, now)
@@ -656,7 +665,8 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
           loadData()
           setTimeout(() => {
             if (cleanedUp) return
-            ensureMessageTimeIndex(dbPath)
+            // Read-only fallback: never create an index or otherwise mutate /
+            // lock OpenCode's database. The v2 path only reads.
             if (!db) return
             const earliestMs = getEarliestUsageDate(db)
             if (earliestMs != null) {

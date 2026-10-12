@@ -52,11 +52,45 @@ export interface V2AssistantContent {
   readonly state?: V2ToolState
 }
 
+/**
+ * OpenCode 2.0.27 `PromptFileSource` — the structured provenance of a user
+ * attachment (`@opencode/client/promise` generated types):
+ * `{ type: "inline" } | { type: "uri"; uri: string }`.
+ * Kept open so unknown future members still round-trip losslessly.
+ */
+export interface V2PromptFileSource {
+  readonly type: string
+  readonly uri?: string
+  readonly [key: string]: unknown
+}
+
+/** OpenCode 2.0.27 `PromptMention`: the `@file` token location in the prompt. */
+export interface V2PromptMention {
+  readonly text?: string
+  readonly start?: number
+  readonly end?: number
+}
+
+/**
+ * OpenCode 2.0.27 `PromptFileAttachment` (a member of `SessionMessageUser.files`).
+ * Real attachments carry base64 `data`, a `mime`, a structured `source`, and
+ * optionally a `name`/`description`/`mention` — the exact shape this adapter
+ * must preserve rather than collapsing to `{ type: "file" }`.
+ */
+export interface V2PromptFileAttachment {
+  readonly data?: string
+  readonly mime?: string
+  readonly source?: V2PromptFileSource | string
+  readonly name?: string
+  readonly description?: string
+  readonly mention?: V2PromptMention
+}
+
 export interface V2Message {
   readonly id?: string
   readonly type?: string
   readonly text?: string
-  readonly files?: readonly unknown[]
+  readonly files?: readonly V2PromptFileAttachment[]
   readonly model?: V2ModelRef
   readonly tokens?: V2Tokens
   readonly cost?: number
@@ -90,8 +124,24 @@ export interface LegacyPart {
     input?: unknown
     title?: string
   }
-  source?: string
+  /**
+   * Legacy string carriers (`source`/`content`/`text`) still flow through as
+   * strings. A real v2 `PromptFileAttachment` instead carries the structured
+   * `PromptFileSource` (`{ type: "inline" } | { type: "uri"; uri }`) so nothing
+   * is lost; `analyze-domain` reads the displayable string from `text`.
+   */
+  source?: string | V2PromptFileSource
   content?: string
+  /** Base64 payload of a v2 `PromptFileAttachment` (`PromptBase64`). */
+  data?: string
+  /** MIME type of a v2 attachment. */
+  mime?: string
+  /** Original attachment name (v2 `PromptFileAttachment.name`). */
+  filename?: string
+  /** Human description (v2 `PromptFileAttachment.description`). */
+  description?: string
+  /** `@file` mention metadata of a v2 attachment. */
+  mention?: V2PromptMention
   arguments?: unknown
   call?: { arguments?: unknown }
   [key: string]: unknown
@@ -111,6 +161,78 @@ function toolOutput(content: readonly V2ToolContent[] | undefined): string {
     .map((c) => (c.type === "text" ? c.text ?? "" : c.uri ?? ""))
     .filter((s) => s.length > 0)
     .join("\n")
+}
+
+/**
+ * Normalize a structured `PromptFileSource`.
+ *
+ * Lossless: the raw members are spread through first, then the required `type`
+ * is normalized, so unknown/future members survive the round-trip instead of
+ * being dropped by a `{ type, uri }` reconstruction.
+ */
+function normalizeFileSource(source: unknown): V2PromptFileSource | undefined {
+  if (!source || typeof source !== "object") return undefined
+  const s = source as Record<string, unknown>
+  const type = typeof s.type === "string" ? s.type : "inline"
+  return { ...s, type }
+}
+
+/** Normalize a `PromptMention`, preserving its text + offsets when present. */
+function normalizeMention(mention: unknown): V2PromptMention | undefined {
+  if (!mention || typeof mention !== "object") return undefined
+  const m = mention as Record<string, unknown>
+  const out: { text?: string; start?: number; end?: number } = {}
+  if (typeof m.text === "string") out.text = m.text
+  if (typeof m.start === "number") out.start = m.start
+  if (typeof m.end === "number") out.end = m.end
+  return out
+}
+
+/**
+ * Map one OpenCode 2.0.27 `PromptFileAttachment` onto the legacy file part.
+ *
+ * Real attachments (`source` object and/or `data`/`mime`) keep their structured
+ * `source` (losslessly, unknown members included), base64 `data`, `mime`,
+ * `filename` (`name`), `description`, and `mention`. A derived `text` label is
+ * added so the analyze domain can still account for the attachment (mention
+ * text → filename → uri).
+ *
+ * Objects that instead carry a plain string carrier (pre-2.0.27 shapes, ad-hoc
+ * input) fall back to the previous `source`/`content`/`text`/`path`/`uri`
+ * precedence. Non-objects and empty carriers yield `null` / `{ type: "file" }`
+ * exactly as before.
+ */
+export function mapFileAttachment(raw: unknown): LegacyPart | null {
+  if (!raw || typeof raw !== "object") return null
+  const f = raw as V2PromptFileAttachment
+
+  const source = normalizeFileSource(f.source)
+  const data = typeof f.data === "string" ? f.data : undefined
+  const mime = typeof f.mime === "string" ? f.mime : undefined
+  const name = typeof f.name === "string" ? f.name : undefined
+  const description = typeof f.description === "string" ? f.description : undefined
+  const mention = normalizeMention(f.mention)
+
+  const isStructured = source !== undefined || data !== undefined || mime !== undefined
+  if (isStructured) {
+    const label = mention?.text ?? name ?? (source?.type === "uri" ? source.uri : undefined)
+    return {
+      type: "file",
+      ...(source ? { source } : {}),
+      ...(data !== undefined ? { data } : {}),
+      ...(mime !== undefined ? { mime } : {}),
+      ...(name !== undefined ? { filename: name } : {}),
+      ...(description !== undefined ? { description } : {}),
+      ...(mention ? { mention } : {}),
+      ...(label ? { text: label } : {}),
+    }
+  }
+
+  // Legacy/defensive: plain string carriers only.
+  const carrier = [f.source, (f as Record<string, unknown>).content, (f as Record<string, unknown>).text, (f as Record<string, unknown>).path, (f as Record<string, unknown>).uri].find(
+    (v) => typeof v === "string" && v.length > 0,
+  )
+  return { type: "file", ...(carrier ? { source: carrier as string } : {}) }
 }
 
 function mapAssistant(m: V2Message): LegacyMessage {
@@ -153,13 +275,8 @@ function mapUser(m: V2Message): LegacyMessage {
     parts.push({ type: "text", text: m.text })
   }
   for (const raw of m.files ?? []) {
-    // v1 file parts exposed a text-bearing field (`source`/`content`/`text`).
-    // v2 attachments are opaque here; map any string carrier defensively.
-    if (raw && typeof raw === "object") {
-      const f = raw as Record<string, unknown>
-      const carrier = [f.source, f.content, f.text, f.path, f.uri].find((v) => typeof v === "string")
-      parts.push({ type: "file", ...(carrier ? { source: carrier as string } : {}) })
-    }
+    const part = mapFileAttachment(raw)
+    if (part) parts.push(part)
   }
   return { ...(m.id ? { id: m.id } : {}), info: { role: "user" }, parts }
 }

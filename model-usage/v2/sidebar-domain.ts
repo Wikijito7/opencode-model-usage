@@ -76,8 +76,25 @@ export function toPricing(models: readonly ModelLike[] | undefined): PricingEntr
   return out
 }
 
-function findPricing(pricing: readonly PricingEntry[], modelID: string | undefined): PricingEntry | undefined {
+/**
+ * Resolve a pricing entry for a model.
+ *
+ * Identity is provider **plus** model id where the data supports it: two
+ * providers can expose the same model id (e.g. `claude`) at different prices,
+ * so an exact provider+model match wins. When the caller has no provider, or no
+ * exact match exists, fall back to the previous model-id-only lookup so
+ * existing behaviour is preserved.
+ */
+function findPricing(
+  pricing: readonly PricingEntry[],
+  modelID: string | undefined,
+  providerID: string | undefined,
+): PricingEntry | undefined {
   if (!modelID) return undefined
+  if (providerID !== undefined) {
+    const exact = pricing.find((p) => p.modelID === modelID && p.providerID === providerID)
+    if (exact) return exact
+  }
   return pricing.find((p) => p.modelID === modelID)
 }
 
@@ -89,8 +106,9 @@ export function splitAssistantCost(
   deltaCost: number,
   modelID: string | undefined,
   pricing: readonly PricingEntry[],
+  providerID?: string,
 ): { inputCost: number; outputCost: number } {
-  const entry = findPricing(pricing, modelID)
+  const entry = findPricing(pricing, modelID, providerID)
   const inputPrice = entry?.input ?? 0
   const outputPrice = entry?.output ?? 0
   const cacheReadPrice = entry?.cacheRead ?? 0
@@ -149,7 +167,7 @@ export function computeSidebarTotals(
     nonCachedInput += input
 
     if (cost > 0) {
-      const split = splitAssistantCost(input, read, out, cost, info.modelID, pricing)
+      const split = splitAssistantCost(input, read, out, cost, info.modelID, pricing, info.providerID)
       inputCost += split.inputCost
       outputCost += split.outputCost
     }

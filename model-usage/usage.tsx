@@ -19,7 +19,7 @@ import { resolveProjection } from "./helpers/projection"
 import { log } from "./helpers/debug"
 import { fmt, fmtCost, fmtCostPerMillion, buildBar, fmtCompact, formatPercentDiff } from "./helpers/format"
 import type { UsageData, ModelUsage } from "./types"
-import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, ensureMessageTimeIndex, fetchRootSessionTimestamps, queryTopSessions, type PeriodStats, type TopSession } from "./db"
+import { getEarliestUsageDate, fetchRawRows, queryUsage, queryDailyTotals, fetchRootSessionTimestamps, queryTopSessions, type PeriodStats, type TopSession } from "./db"
 import { openAnalyze } from "./analyze"
 import { sortModels, costPerMillion, type ModelSortKey } from "./helpers/models"
 import { makeScrollState } from "./wlib/src/core/scroll"
@@ -673,7 +673,6 @@ export function registerUsageCommand(api: TuiPluginApi, host: WlibHost) {
               loadData()
               setTimeout(() => {
                 if (cleanedUp) return
-                ensureMessageTimeIndex(dbPath)
                 if (!db) return
                 const earliestMs = getEarliestUsageDate(db)
                 if (earliestMs != null) {

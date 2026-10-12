@@ -27,7 +27,7 @@ description: "CRITICAL: Load when adding, moving, or refactoring code in this re
 | v1 (deprecated) | `model-usage.tsx`, `model-usage-server.ts`, `model-usage/{analyze,usage,sidebar}.tsx` | transition only; v1 adapter, never loaded by v2 |
 | Pure domain | `model-usage/{analyze,usage}-domain.ts` | pure functions, fully testable |
 | Pure helpers | `model-usage/helpers/*.ts` | pure utilities, fully testable |
-| Data layer | `model-usage/{db,cache,quota}.ts` | sqlite / JSON cache / quota fetch |
+| Data layer | `model-usage/{db,cache,quota}.ts` | sqlite / JSON cache / quota fetch. OpenCode DB is opened `readonly: true` on every path — **never** write or create/modify indexes |
 | Shared code | `model-usage/wlib/` (submodule) | ALL cross-cutting helpers live here — never duplicate |
 
 ## Conventions (MUST)
@@ -45,6 +45,7 @@ description: "CRITICAL: Load when adding, moving, or refactoring code in this re
 - Mixing v1 and v2 host APIs in one runtime adapter (v1 files use `createV1Host`, v2 files use `createV2Host`)
 - Recreating wlib functionality locally (scroll/keys/theme/log/reload/clipboard/dialog/system)
 - Putting business logic inside `.tsx` dialog components
+- Opening the OpenCode SQLite database writable (omitting `{ readonly: true }`) or running any DDL/index creation against it — the plugin is a read-only consumer
 - Adding new files to `model-usage/shared/` — the folder was removed; shared code lives in `wlib/`
 
 ## References

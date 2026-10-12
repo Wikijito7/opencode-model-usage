@@ -1,8 +1,14 @@
 # OpenCode v1 → v2 Migration Guide (cross-repository)
 
-> **Status: planning / TL;DR. Not implementation. Deployment is NOT performed.**
-> Everything below is local-only preparation. No repo is pushed, deployed,
-> installed, or committed as part of this task.
+> **Status: the v2 migration baseline is committed locally on branch `v2`
+> (commit `b69419f`); deployment is still pending.** The follow-up,
+> reviewer-driven fixes, their tests, and the wlib submodule bump are present as
+> **uncommitted working-tree changes** on branch `v2` and are not yet approved.
+> Nothing has been pushed or opened as a PR for `opencode-model-usage` yet, and
+> final review/QA approval is **pending**. Nothing is deployed, installed, or
+> synced to the live `~/.config/opencode`. The cross-repository plan is complete;
+> the push/PR, review/QA, and deployment/verification steps in §8 remain
+> outstanding.
 
 This document is the cross-repository plan for porting the Wokis OpenCode
 plugins from the OpenCode **v1** plugin API to OpenCode **v2**. It is the shared
@@ -65,7 +71,7 @@ the OpenCode 2.0.27 reference exposes (file path cited per row).
 | Plugin package | `@opencode-ai/plugin`, `@opencode-ai/plugin/tui` | `@opencode/plugin`, `@opencode/plugin/tui`, `@opencode/plugin/effect`, `@opencode/plugin/host`, `@opencode/plugin/runtime` (`reference/packages/plugin/package.json`) |
 | Plugin module shape | TUI: `const tui: TuiPlugin = async (api) => {…}` + `export default { id, tui }` (e.g. `model-usage.tsx:20`, `persona-injector.tsx:71`) | `Plugin.define({ id, setup })` (`reference/packages/plugin/src/tui/plugin.ts`, `.../src/promise/plugin.ts`, `.../src/effect/plugin.ts`) |
 | Server module shape | `export const XServerPlugin = async () => ({ …hook map… })` (`model-usage-server.ts:126`, `persona-injector-server.ts:75`) | `export default Plugin.define({ id, setup })` |
-| Entry-file resolution | Convention-based single entry | `Host.resolve` resolves distinct **`server`**, **`tui`**, **`rpc`** subpaths (`reference/packages/plugin/src/host.ts`) |
+| Entry-file resolution | Convention-based single entry | `Host.resolve` resolves distinct **`server`** (then `index`), **`tui`**, **`rpc`** subpaths (`reference/packages/plugin/src/host.ts`) |
 | Client / SDK | `@opencode-ai/sdk/v2` (`model-usage-server.ts:3`) | `@opencode/client` (+ `@opencode/schema/*`, `@opencode/protocol/*`) — **exact v2 client surface to validate** |
 
 ### 3.2 Hooks
@@ -197,32 +203,85 @@ Full v2 slot paths (`reference/packages/plugin/src/tui/context.ts` `SlotMap`):
 
 ## 5. Config changes
 
-### 5.1 `tui.json` → `cli.json`
+### 5.1 `tui.json` → `cli.json` (and `opencode.json(c)` plugins)
 
 | v1 | v2 |
 | --- | --- |
-| `~/.config/opencode/tui.json` → `{ "plugin": [ "./plugins/persona-injector.tsx" ] }` (persona README “Deployment”; also `plugin_enabled`) | `~/.config/opencode/cli.json` → `{ "$schema": "https://opencode.ai/v2/cli.json", "plugins": [ "./plugins/persona-injector.tsx" ] }` |
-| `opencode.json` plugin registration | `plugins` field (same `ConfigPlugin.Plugins` array) |
+| `~/.config/opencode/tui.json` → `{ "plugin": [ "./plugins/model-usage.tsx" ] }` (loose v1 entry file registered explicitly) | `~/.config/opencode/cli.json` → `{ "$schema": "https://opencode.ai/v2/cli.json", "plugins": [] }` — **TUI-only**. Local plugin **directories** under `~/.config/opencode/plugins/` are auto-discovered by the TUI (see §5.2) |
+| `opencode.json` plugin registration | `opencode.json(c)` `plugins` field (same `ConfigPlugin.Plugins` array) — the **server/config** plugin list |
 
 - Field key is **`plugin` (v1) → `plugins` (v2)**.
-- v2 plugin entry: `string | { package: string, options?: Record<string, unknown> }`
-  (`reference/packages/schema/src/config/plugin.ts`,
-  `reference/packages/tui/src/config/index.tsx`).
+- **Two distinct `plugins` fields in v2 — do not conflate them:**
+  - `opencode.json(c)` `plugins` → the **core/server/config** plugin list
+    (`reference/packages/schema/src/config/plugin.ts`;
+    `reference/packages/core/src/config/normalize.ts`).
+  - `cli.json` `plugins` → the **TUI-only** plugin list
+    (`reference/packages/tui/src/config/index.tsx`;
+    `reference/packages/cli/src/config/schema.ts`).
+- v2 plugin entry: `string | { package: string, options?: Record<string, unknown> }`.
+  These arrays are for **npm packages** (and enable/disable/ordering directives);
+  local plugins are discovered from their directories.
+- **A configured local plugin target must be a directory.** Explicit local
+  **file** config targets are rejected — do not point `tui.json` / `cli.json` /
+  `opencode.json(c)` at a loose deprecated v1 entry file such as
+  `./plugins/persona-injector.tsx`. v2 resolves a plugin **directory** through
+  `Host.resolve`, which looks for the `server` entry (then falls back to
+  `index`) and the `tui` entry. The safe v2 layout is one directory per plugin:
+
+  ```
+  ~/.config/opencode/plugins/
+    persona-injector/        # or model-usage/
+      index.ts               # server entry (Plugin.define); a `server.*` entry also resolves
+      tui.tsx                # TUI entry (Plugin.define)
+  ```
+
+  Such a directory is auto-discovered; it does **not** need a `plugins` entry.
 - OpenCode ships an automatic migration of `tui.json` + legacy `kv.json` into
   `cli.json` (`reference/packages/cli/src/config/migrate.ts`,
   `migrateV1`), including `plugin` → `plugins` and `plugin_enabled`.
   `SchemaURL` is `https://opencode.ai/v2/cli.json`
   (`reference/packages/cli/src/config/schema.ts`).
 
-### 5.2 Discovery / layout
+> ⚠️ **Test v2 in a separate config root from v1.** v1 deploys flat entry files
+> (e.g. a bare `model-usage-server.ts`) directly in `plugins/`. Core (server)
+> discovery in v2 **admits bare `.ts`/`.js` children**, so it will try to load
+> those v1 files as v2 server plugins and fail (v1 modules export no default
+> `{ id, setup }`). Keep the v1 and v2 config roots apart so v1's flat `.ts`
+> files are never auto-discovered by `opencode2`.
 
-- Local plugin directories are discovered automatically from
-  `<configDir>/plugins/` and project `.opencode/plugins/`; **each subdirectory
-  is one plugin** (`reference/packages/tui/src/plugin/discovery.ts`,
-  `localPluginDirectories` + `discoverPluginTargets`).
-- A plugin target is resolved by `Host.resolve`, which looks for the
-  **`server`**, **`tui`**, and **`rpc`** subpaths / entry files
-  (`reference/packages/plugin/src/host.ts`).
+### 5.2 Discovery / layout (core vs TUI)
+
+**Core (server) discovery** — `reference/packages/core/src/plugin/source-directory.ts`
+(`names = ["plugin", "plugins"]`, `discover`):
+
+- Scans the **immediate children** of **both** `<configDir>/plugin/` **and**
+  `<configDir>/plugins/` (and the project equivalents).
+- Admits **bare `.ts`/`.js` files** and **directories**; a symlink is admitted if
+  it targets a `.ts`/`.js` file or a directory.
+
+**TUI discovery** — `reference/packages/tui/src/plugin/discovery.ts`
+(`localPluginDirectories` + `discoverPluginTargets`, consumed in
+`reference/packages/tui/src/plugin/context.tsx`):
+
+- Scans only the **plural** `<configDir>/plugins/` (and the project
+  `.opencode/plugins/`).
+- Admits **immediate directories / symlinks-to-dirs only** — never bare files.
+
+**Entrypoint resolution** — `Host.resolve`
+(`reference/packages/plugin/src/host.ts`): for a directory target it looks for
+the server entry as **`server` first, then `index`**, the TUI entry as **`tui`**,
+and rpc as `rpc`.
+
+**Consequences:**
+
+- The safe v2 layout is one directory per plugin under the plural `plugins/`,
+  with `index.ts` (server; `server.*` also resolves) and `tui.tsx` (TUI). See
+  §5.1.
+- Because core discovery also admits **bare `.ts`/`.js` children**, v1's flat
+  `*-server.ts` files in a shared `plugins/` are auto-discovered by v2 and fail
+  to load. **Test v2 in a separate config root from v1** (§8).
+- A configured local plugin target must be a **directory**; explicit local file
+  targets are rejected.
 - Packages listed in config `plugins` are installed/resolved via npm; only those
   with a resolved `tui` entrypoint are surfaced by `opencode plugin list`
   (`reference/packages/cli/src/commands/handlers/plugin/list.ts`).
@@ -231,9 +290,9 @@ Full v2 slot paths (`reference/packages/plugin/src/tui/context.ts` `SlotMap`):
   directives).
 - **Deployment-layout change:** v1 deployed loose entry files
   (`~/.config/opencode/plugins/model-usage.tsx`, `…-server.ts`, `…/model-usage/`)
-  and registered one path in `tui.json`. v2 expects a discoverable
-  plugin **directory** with resolved server/tui entrypoints. The exact v2
-  on-disk layout must be confirmed against a real `opencode2` install (§11).
+  and registered one path in `tui.json`; those loose files must **not** sit in
+  the v2 config root's `plugins/`. v2 expects a discoverable plugin **directory**
+  with resolved server/tui entrypoints.
 
 ---
 
@@ -244,9 +303,9 @@ disagree:**
 
 - **wlib is a git submodule, not an npm dependency.** The real version is the
   gitlink commit recorded by the parent repo (`.gitmodules` + index), not
-  anything in a lockfile. Current pin in both consumers:
-  `545fe7c736592974a377ebd94711f3b14c63c09d` (`origin/HEAD`, i.e. `main`) — **not
-  the v2 commit yet**.
+  anything in a lockfile. Current pin in the model-usage consumer:
+  `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`, the canonical v2
+  commit). (persona-injector's pin is tracked separately.)
 - **No tracked `package.json` or lockfile exists** in any of the three repos on
   the `v2` branch. The runtime API (`@opencode-ai/plugin@1.4.1` per issue #34) is
   supplied by the host, so nothing anchors it locally.
@@ -258,9 +317,10 @@ disagree:**
 
 **Reconciliation checklist:**
 
-- [ ] After wlib v2 lands, bump the submodule in persona-injector and
-      model-usage to a v2-containing commit (issue #4: only after v2 wlib tests
-      pass).
+- [ ] Bump the submodule in persona-injector to a v2-containing commit (issue #4:
+      only after v2 wlib tests pass). model-usage is already bumped to
+      `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`) as an uncommitted
+      working-tree change (§13.1).
 - [ ] `git submodule update --init --recursive` and verify with
       `git submodule status`.
 - [ ] If/when a `package.json` is added (npm distribution, issue #47), regenerate
@@ -295,11 +355,18 @@ disagree:**
 - [ ] wlib v2 implementation complete; `bun test` green; typecheck green.
 - [ ] persona-injector v2 complete; ports `wlib`; tests + typecheck green.
 - [ ] model-usage v2 complete; ports `wlib`; tests + typecheck green.
-- [ ] Submodule consumers bumped to the v2 wlib commit.
-- [ ] `tui.json` → `cli.json` `plugins` migration verified.
-- [ ] Plugin discovery layout verified under a real `opencode2` install.
-- [ ] Sync via the `deploy` skill (entry points + `rsync` mirror; tests excluded;
-      runtime artifacts preserved). **Not yet executed.**
+- [ ] Submodule consumers bumped to the v2 wlib commit (model-usage is pinned at
+      `544670f5b680046d39ef2f2a67cd2226d1e1e257`, `origin/v2`).
+- [ ] `tui.json` → `cli.json` `plugins` migration verified (TUI-only list;
+      `opencode.json(c)` `plugins` remains the server/config list).
+- [ ] A **separate v2 config root** prepared (distinct from the v1 root) so v1's
+      flat `plugins/*.ts` entry files are not auto-discovered by `opencode2`.
+- [ ] Plugin discovery layout verified under a real `opencode2` install: one
+      directory per plugin under the plural `plugins/` with `index.ts` (server)
+      + `tui.tsx` (TUI).
+- [ ] Sync via the `deploy` skill (v2 = directory `rsync` mirror only, no loose
+      entry `cp`; tests excluded; runtime artifacts preserved). **Not yet
+      executed.**
 - [ ] Runtime verification in `opencode2`: server load, `/persona`, `/usage`,
       `/analyze`, sidebar + prompt indicators, dialogs, exports, quota.
 - [ ] No v1 plugin APIs remain in productive code or `wlib`.
@@ -309,9 +376,18 @@ disagree:**
 ## 9. model-usage SQLite / data migration strategy and fallback
 
 **Current state:** `model-usage/db.ts` opens OpenCode's SQLite database directly
-with `bun:sqlite` (read-only) and queries `session` / message tables;
+with `bun:sqlite` (`readonly: true`) and queries `session` / message tables;
 `model-usage/cache.ts` keeps persistent month/week/day caches; the server writes
 `system-tokens.json` and `tool-defs.json`.
+
+**No DB mutation / no index creation:** every runtime path (v1 and v2) opens the
+OpenCode database read-only. The plugin **never writes to it and never creates or
+modifies indexes**. An earlier v1-only path called `ensureMessageTimeIndex`,
+which opened a second read-write connection and ran
+`CREATE INDEX IF NOT EXISTS message_time_created_idx ON message(time_created)`;
+that call and helper were removed. Queries rely on whatever indexes the installed
+DB already has and remain correct without one; installs that already created the
+index keep using it.
 
 **v2 strategy:**
 
@@ -364,9 +440,14 @@ Checklist:
   publishes `prompt.footer.status`, `prompt.footer.file`, and
   `home.footer.status`. Which exact path (and placement key) preserves current
   indicator behavior must be validated against a real `opencode2` session.
-- **Runtime installation / layout:** the v2 plugin directory layout and
-  auto-discovery behavior need verification on a live `opencode2`; issue #47
-  lists `opencode.json`, `cli.json`, or `plugins/tui/` discovery as candidates.
+- **Runtime installation / layout (resolved by 2.0.27 discovery):** core (server)
+  discovery scans the immediate children of both `plugin/` and `plugins/` and
+  admits bare `.ts`/`.js` plus directories/symlinks; TUI discovery scans
+  immediate dirs/symlinks-to-dirs only under the plural `plugins/`; configured
+  local targets must be directories; `Host.resolve` tries `server` then `index`
+  (server) and `tui` (TUI). Safe layout: `plugins/<name>/{index.ts,tui.tsx}`
+  (§5.1–§5.2). Still to do: confirm this against a live `opencode2` install in a
+  **separate config root from v1** (§8).
 - **System-prompt observation semantics:** v1 relies on hook registration order
   for `experimental.chat.system.transform`; v2 `session.hook("context")`
   timing/mutability (`SessionContext.system: Array<SystemPart>`) must be
@@ -382,7 +463,8 @@ Checklist:
   reference package is `@opencode/plugin/tui`. Treat the reference as
   authoritative unless the Coordinator says otherwise.
 - **notifications repository:** location and scope unknown (§10).
-- **Submodule pin** currently points at `main`, not a v2 commit (§6).
+- **Submodule pin** is `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`) in
+  model-usage (§6); persona-injector's pin is tracked separately.
 
 ---
 
@@ -401,18 +483,23 @@ Checklist:
 
 ---
 
-## 13. Implementation record — opencode-model-usage (local, uncommitted)
+## 13. Implementation record — opencode-model-usage (v2 branch)
 
-This section records what was actually implemented on the local `v2` branch.
-Nothing is committed, pushed, deployed, or installed.
+This section records what was implemented on the local `v2` branch. The
+implementation baseline is **committed locally** at `b69419f`; the follow-up,
+reviewer-driven fixes, their tests, and the wlib submodule bump are
+**uncommitted working-tree changes** and are not yet approved. Nothing has been
+pushed or opened as a PR for `opencode-model-usage` yet, final review/QA approval
+is **pending**, and deployment, install, and live `opencode2` verification are
+still pending (§8).
 
 ### 13.1 wlib foundation pin
 
-- `model-usage/wlib` submodule updated to the canonical v2 foundation commit
-  **`e91baf2877bf19c27f70a1c817f1348ccd3f5353`**
-  (`Add v2 host adapter and migrate wlib helpers onto WlibHost`).
-- Fetched from the local `opencode-wlib` checkout (the commit is not on the
-  submodule's remote yet), so no network install occurred.
+- `model-usage/wlib` submodule updated to the canonical v2 commit
+  **`544670f5b680046d39ef2f2a67cd2226d1e1e257`**
+  (`Correct v2 renderer API to read live terminal geometry`), pushed to the
+  submodule remote (`origin/v2`).
+- Fetched from the submodule remote `origin/v2`; no package install occurred.
 - The v2 host adapter lives at `model-usage/wlib/src/host/v2.ts`
   (`createV2Host`); the deprecated v1 adapter at `.../host/v1.ts`
   (`createV1Host`).
@@ -426,8 +513,8 @@ Nothing is committed, pushed, deployed, or installed.
 | `model-usage/v2/sidebar.tsx` | Sidebar on `context.data` (session model/family/messages) + quota. |
 | `model-usage/v2/usage.tsx` | `/usage` dialog ported to the host adapter; SQLite fallback for history. |
 | `model-usage/v2/analyze.tsx` | `/analyze` dialog ported to the host adapter; data from `context.data.session.message.list`. |
-| `model-usage/v2/backend.ts` | Pure historical-usage backend selection (`v2-data` \| `sqlite` \| `none`) + `isSqliteAvailable`. |
-| `model-usage/v2/message-adapter.ts` | Pure v2 `SessionMessageInfo` → legacy `{ info, parts }` mapping. |
+| `model-usage/v2/backend.ts` | v2 data/backend boundary: historical-usage backend selection (`v2-data` \| `sqlite` \| `none`), SQLite availability validation (regular file + `SQLite format 3` header), and read-only database opening. The TUI never imports `bun:sqlite`. |
+| `model-usage/v2/message-adapter.ts` | Pure v2 `SessionMessageInfo` → legacy `{ info, parts }` mapping, including full OpenCode 2.0.27 `PromptFileAttachment` preservation (structured `source` — unknown members included — `data`, `mime`, `name`, `description`, `mention`). |
 | `model-usage/v2/sidebar-domain.ts` | Pure sidebar token/cost aggregation + v2 model pricing. |
 
 ### 13.3 Files changed (deprecation / decoupling)
@@ -465,6 +552,8 @@ contract and the `/analyze` reader keep working).
 - **Retained fallback (SQLite):** `/usage` historical per-period, per-model
   aggregation has no v2 API on 2.0.27, so `db.ts`/`cache.ts` remain; the choice
   is isolated in `v2/backend.ts` and degrades to an explicit "unavailable" view.
+  The SQLite access is strictly read-only: the plugin never writes to the DB and
+  never creates or modifies indexes (see §9).
 - **Unsupported / unstable (documented, not silently broken):** no v2 historical
   aggregation; `/usage` depends on OpenCode's SQLite schema
   (`message.data` JSON `modelID`/`providerID`/`cost`/`tokens`, `session` table).
@@ -474,9 +563,13 @@ contract and the `/analyze` reader keep working).
 - v1 and v2 are **separate entrypoints** and **separate UI modules**; each uses
   exactly one host adapter. No runtime branches mix the APIs.
 - v2 deploy: `model-usage/` → `~/.config/opencode/plugins/model-usage/`; OpenCode
-  2.0.27 discovery resolves `server.ts` + `tui.tsx`. Loose v1 files are not
-  directories and are never auto-discovered.
-- v1 deploy: legacy loose files registered via `tui.json`.
+  2.0.27 discovery resolves the server entry (the repo's current `server.ts` via
+  the `server` candidate; the canonical safe layout names it `index.ts` — both
+  resolve) + `tui.tsx` (the `tui` candidate). Deploy into a **separate config
+  root from v1**: v2 core discovery admits bare `.ts`/`.js` children, so v1's
+  loose `model-usage-server.ts` would be auto-discovered and fail to load.
+- v1 deploy: legacy loose files registered via `tui.json`, in their **own**
+  config root.
 - The deprecated v1 entrypoints are not removed yet (cleanup is issue #50).
 
 ### 13.7 Unresolved API limitations / blockers
@@ -491,18 +584,26 @@ contract and the `/analyze` reader keep working).
 - `@opencode/plugin` request/response hook shapes were read from the local
   2.0.27 reference checkout; treat that checkout as authoritative.
 
-### 13.8 Required tests (NOT written in this task)
+### 13.8 Tests
 
-Domain/data logic is pure and testable; the following tests are required:
+Domain/data logic is pure and testable; the v2 suites are written and run under
+`bun:test` (`tests/model-usage/v2/{backend,message-adapter,sidebar-domain}.test.ts`
+plus `tests/model-usage/analyze-domain.test.ts`):
 
 - `v2/message-adapter.ts` — assistant tokens/cost/tool mapping, user text/file
-  parts, compaction → synthetic user message with a `compaction` part, unknown
-  message kinds skipped, non-object input ignored.
+  parts (including full `PromptFileAttachment` preservation: lossless structured
+  `source`, `data`, `mime`, `name`, `description`, `mention`), compaction →
+  synthetic user message with a `compaction` part, unknown message kinds
+  skipped, non-object input ignored.
 - `v2/sidebar-domain.ts` — `toPricing` (first tier, missing modelID), price-weighted
-  vs proportional `splitAssistantCost`, `computeSidebarTotals` peak = max(input+cacheRead),
+  vs proportional `splitAssistantCost` (provider+model identity wins, model-only
+  fallback preserved), `computeSidebarTotals` peak = max(input+cacheRead),
   `sumSidebarTotals`.
-- `v2/backend.ts` — `selectUsageBackend` precedence and `isSqliteAvailable`
-  missing/error paths.
+- `v2/backend.ts` — `selectUsageBackend` precedence, `isSqliteAvailable`/
+  `sqliteDbStatus` (accepts a real SQLite header; distinguishes `missing` from
+  `malformed`/`unreadable`; rejects directories, empty/arbitrary files,
+  missing/unreadable paths), and `openUsageDatabase` success/failure handles
+  (including header validation inside the open path).
 - `server.ts` pure helpers — `isTitleGenerator`, `buildToolDefText`/`buildToolDefSnapshot`,
   `mergeSystemSnapshot` (first write, drift throttle, timestamp refresh, backfill,
   <70% compaction replace, no-op).

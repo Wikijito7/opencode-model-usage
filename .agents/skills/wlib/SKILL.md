@@ -67,9 +67,9 @@ Feature-specific serializers (usage, analyze, …) live in the consuming plugin,
 
 ## Submodule upkeep
 
-- Current pin: `e91baf2877bf19c27f70a1c817f1348ccd3f5353` (canonical v2 foundation — `WlibHost` + `src/host/{v1,v2}`).
+- Current pin: `544670f5b680046d39ef2f2a67cd2226d1e1e257` (canonical v2 commit — `WlibHost` + `src/host/{v1,v2}`; corrects the v2 renderer API to read live terminal geometry).
 - Bump: `git submodule update --remote --merge` at repo root, then commit the pointer change.
-- If the submodule working tree is dirty and the merge refuses: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib reset --hard origin/main` (only after confirming no local work).
+- The canonical branch is `origin/v2` (the pin tracks it). If the submodule working tree is dirty and the merge refuses: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib reset --hard origin/v2` (only after confirming no local work).
 - Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).
 - wlib source lives in the `opencode-wlib` repo — never edit its files only inside the submodule; upstream changes there first.
 

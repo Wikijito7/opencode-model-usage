@@ -137,6 +137,58 @@ describe("splitAssistantCost", () => {
   it("returns zeros when the model id is undefined and there are no tokens", () => {
     expect(splitAssistantCost(0, 0, 0, 0, undefined, emptyPricing)).toEqual({ inputCost: 0, outputCost: 0 })
   })
+
+  // ─── provider + model identity ─────────────────────────────────────────────
+
+  // Two providers expose the same model id at different prices. The exact
+  // provider+model entry must win; a model-only lookup would silently use the
+  // first entry for both.
+  const sharedModelPricing: PricingEntry[] = [
+    { providerID: "anthropic", modelID: "claude", input: 3, output: 15, cacheRead: 0.3 },
+    { providerID: "openrouter", modelID: "claude", input: 2, output: 20, cacheRead: 0.2 },
+  ]
+
+  it("picks the exact provider+model pricing entry", () => {
+    const anthropic = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing, "anthropic")
+    expect(anthropic.inputCost).toBeCloseTo(3.75, 10)
+    expect(anthropic.outputCost).toBeCloseTo(6.25, 10)
+
+    const openrouter = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing, "openrouter")
+    // inputWeight = (500000*2 + 1000000*0.2)/1e6 = 1.2 ; outputWeight = 4.0
+    expect(openrouter.inputCost).toBeCloseTo((10 * 1.2) / 5.2, 10)
+    expect(openrouter.outputCost).toBeCloseTo((10 * 4.0) / 5.2, 10)
+  })
+
+  it("distinguishes the same model id across providers", () => {
+    const anthropic = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing, "anthropic")
+    const openrouter = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing, "openrouter")
+    expect(anthropic.inputCost).not.toBeCloseTo(openrouter.inputCost, 6)
+    expect(anthropic.outputCost).not.toBeCloseTo(openrouter.outputCost, 6)
+  })
+
+  it("falls back to the first model-id match when the provider is unknown", () => {
+    const split = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing, "nope")
+    expect(split.inputCost).toBeCloseTo(3.75, 10)
+    expect(split.outputCost).toBeCloseTo(6.25, 10)
+  })
+
+  it("uses model-id-only matching when no provider is supplied", () => {
+    const split = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "claude", sharedModelPricing)
+    expect(split.inputCost).toBeCloseTo(3.75, 10)
+    expect(split.outputCost).toBeCloseTo(6.25, 10)
+  })
+
+  it("falls back to a provider-less entry when the provider has no exact match", () => {
+    const pricing: PricingEntry[] = [
+      { modelID: "m", input: 1, output: 1, cacheRead: 0 },
+      { providerID: "p", modelID: "m", input: 3, output: 15, cacheRead: 0.3 },
+    ]
+    const split = splitAssistantCost(500_000, 1_000_000, 200_000, 10, "m", pricing, "other")
+    // no provider+model match → first model-id entry (input 1/output 1, cache 0)
+    // inputWeight = 500000/1e6 = 0.5 ; outputWeight = 200000/1e6 = 0.2
+    expect(split.inputCost).toBeCloseTo((10 * 0.5) / 0.7, 10)
+    expect(split.outputCost).toBeCloseTo((10 * 0.2) / 0.7, 10)
+  })
 })
 
 // ─── computeSidebarTotals ─────────────────────────────────────────────────────
@@ -146,8 +198,12 @@ function assistant(
   tokens: { input?: number; output?: number; cache?: { read?: number; write?: number } },
   cost = 0,
   modelID = "m",
+  providerID?: string,
 ): LegacyMessage {
-  return { info: { role: "assistant", modelID, tokens, cost } as LegacyMessage["info"], parts: [] }
+  return {
+    info: { role: "assistant", modelID, providerID, tokens, cost } as LegacyMessage["info"],
+    parts: [],
+  }
 }
 
 describe("computeSidebarTotals", () => {
@@ -207,6 +263,33 @@ describe("computeSidebarTotals", () => {
     const pricing: PricingEntry[] = [{ modelID: "m", input: 3, output: 15, cacheRead: 0.3 }]
     const totals = computeSidebarTotals(
       [assistant({ input: 500_000, output: 200_000, cache: { read: 1_000_000 } }, 10)],
+      pricing,
+    )
+    expect(totals.inputCost).toBeCloseTo(3.75, 10)
+    expect(totals.outputCost).toBeCloseTo(6.25, 10)
+  })
+
+  it("uses provider-specific pricing for the same model id", () => {
+    const pricing: PricingEntry[] = [
+      { providerID: "anthropic", modelID: "claude", input: 3, output: 15, cacheRead: 0.3 },
+      { providerID: "openrouter", modelID: "claude", input: 2, output: 20, cacheRead: 0.2 },
+    ]
+    const tokens = { input: 500_000, output: 200_000, cache: { read: 1_000_000 } }
+    const totals = computeSidebarTotals(
+      [assistant(tokens, 10, "claude", "anthropic"), assistant(tokens, 10, "claude", "openrouter")],
+      pricing,
+    )
+    expect(totals.inputCost).toBeCloseTo(3.75 + (10 * 1.2) / 5.2, 10)
+    expect(totals.outputCost).toBeCloseTo(6.25 + (10 * 4.0) / 5.2, 10)
+  })
+
+  it("falls back to model-only pricing for a message without a provider", () => {
+    const pricing: PricingEntry[] = [
+      { providerID: "anthropic", modelID: "claude", input: 3, output: 15, cacheRead: 0.3 },
+      { providerID: "openrouter", modelID: "claude", input: 2, output: 20, cacheRead: 0.2 },
+    ]
+    const totals = computeSidebarTotals(
+      [assistant({ input: 500_000, output: 200_000, cache: { read: 1_000_000 } }, 10, "claude")],
       pricing,
     )
     expect(totals.inputCost).toBeCloseTo(3.75, 10)

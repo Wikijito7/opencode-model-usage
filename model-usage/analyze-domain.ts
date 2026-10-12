@@ -33,8 +33,66 @@ export interface AnalyzeMessageInfo {
   cost?: number
 }
 
+/**
+ * Structured provenance of a v2 attachment (`PromptFileSource`):
+ * `{ type: "inline" } | { type: "uri"; uri }`. Kept open so unknown/future
+ * members round-trip structurally without falling back to `any`.
+ */
+export interface AnalyzePromptFileSource {
+  type: string
+  uri?: string
+  [key: string]: unknown
+}
+
+/** `@file` mention metadata of a v2 attachment (`PromptMention`). */
+export interface AnalyzePromptMention {
+  text?: string
+  start?: number
+  end?: number
+}
+
+/** Tool invocation state consumed by the TOOLS accounting loop. */
+export interface AnalyzeToolState {
+  status?: string
+  output?: string
+  input?: unknown
+  title?: string
+}
+
+/**
+ * Structural part shape this domain consumes. Mirrors the fields produced by
+ * the v2 adapter (`v2/message-adapter.ts` `LegacyPart`) for attachments —
+ * structured `source`, base64 `data`, `mime`, `filename`, `description`,
+ * `mention` — plus the text/reasoning/tool fields read by the main loop.
+ */
 export interface AnalyzePart {
   type: string
+  /** Text payload of `text`/`reasoning` parts and the adapter's derived file label. */
+  text?: string
+  /** True for synthetic user text parts (compaction scaffolding). */
+  synthetic?: boolean
+  /** Tool name on `tool` parts. */
+  tool?: string
+  /** Tool invocation state on `tool` parts. */
+  state?: AnalyzeToolState
+  /** Legacy string carrier or structured v2 attachment source. */
+  source?: string | AnalyzePromptFileSource
+  /** Legacy string carrier still emitted by some v1 shapes. */
+  content?: string
+  /** Base64 payload of a v2 `PromptFileAttachment`. */
+  data?: string
+  /** MIME type of a v2 attachment. */
+  mime?: string
+  /** Original attachment name (v2 `PromptFileAttachment.name`). */
+  filename?: string
+  /** Human description (v2 `PromptFileAttachment.description`). */
+  description?: string
+  /** `@file` mention metadata of a v2 attachment. */
+  mention?: AnalyzePromptMention
+  /** Tool-call arguments carried directly on the part (legacy forms). */
+  arguments?: unknown
+  /** Tool-call arguments nested under `call` (legacy forms). */
+  call?: { arguments?: unknown }
 }
 
 export interface AnalyzeMessage {
@@ -230,7 +288,7 @@ export function analyzeSessionMessages(
   // First assistant message with non-zero tokens.input — used for
   // the Tier 2 telemetry subtraction. A title-generator assistant
   // (tokens.input === 0) is skipped.
-  let firstNonzeroAssistant: any = null
+  let firstNonzeroAssistant: AnalyzeMessage | null = null
   // sessionWasCompacted derived from resolveCompactionEvents after the loop
   let sessionWasCompacted = false
   // Per-message telemetry sum for reasoning tokens (provider-reported,
@@ -248,16 +306,16 @@ export function analyzeSessionMessages(
   for (const msg of messages) {
     const info = msg.info
     if (info.role !== "assistant" && info.role !== "user") continue
-    const parts: any[] = (msg.parts ?? []) as any[]
-    const msgId = msg.id ?? (info as any)?.id
+    const parts = msg.parts ?? []
+    const msgId = msg.id ?? (info as { id?: string }).id
     log("analyze: msg", msgId, "role:", info.role, "parts:", parts.length)
 
     // Check for compaction part (signals a compaction summary message)
-    const hasCompaction = parts.some((p: any) => p.type === "compaction")
+    const hasCompaction = parts.some((p) => p.type === "compaction")
 
     // ── Model Usage Records Ledger (Genuine full ledger, all assistant messages) ──
     if (info.role === "assistant") {
-      const asstInfo = info as unknown as { providerID?: string; modelID?: string; tokens?: { input?: number; output?: number; cache?: { read?: number; write?: number }; reasoning?: number }; cost?: number }
+      const asstInfo = info
       const providerID = asstInfo.providerID
       const modelID = asstInfo.modelID
       if (providerID && modelID) {
@@ -280,7 +338,7 @@ export function analyzeSessionMessages(
           const t = p.type || "unknown"
           partCounts[t] = (partCounts[t] || 0) + 1
         }
-        const hasNonEmptyTextPart = parts.some((p: any) => p.type === "text" && typeof p.text === "string" && p.text.length > 0)
+        const hasNonEmptyTextPart = parts.some((p) => p.type === "text" && typeof p.text === "string" && p.text.length > 0)
         const visibleOutputTokens = estimateVisibleOutputTokens(parts)
 
         log(
@@ -317,9 +375,9 @@ export function analyzeSessionMessages(
       if (hasCompaction) { log("analyze: SKIP user msg", msgId, "- has compaction part"); continue }
 
       // Skip messages where ALL text parts are synthetic
-      const textParts = parts.filter((p: any) => p.type === "text")
+      const textParts = parts.filter((p) => p.type === "text")
       const allSynthetic = textParts.length > 0
-        && textParts.every((p: any) => p.synthetic === true)
+        && textParts.every((p) => p.synthetic === true)
       if (allSynthetic) { log("analyze: SKIP user msg", msgId, "- all text parts are synthetic"); continue }
 
       // Extract text from non-synthetic text parts
@@ -342,10 +400,19 @@ export function analyzeSessionMessages(
           }
         }
       }
-      // Also extract text from file parts
+      // Also extract text from file parts. v2 attachments carry a structured
+      // `source` ({ type: "inline" } | { type: "uri"; uri }); the adapter adds
+      // a displayable `text` label, so keep the string carriers and only fall
+      // back to a structured source uri when no string is present.
       for (const part of parts) {
         if (part.type === "file") {
-          const fileText = part.source ?? part.content ?? part.text ?? ""
+          const src = part.source
+          const fileText =
+            typeof src === "string" ? src
+            : typeof part.content === "string" ? part.content
+            : typeof part.text === "string" ? part.text
+            : src && typeof src === "object" && typeof src.uri === "string" ? src.uri
+            : ""
           if (fileText.length > 0) {
             text += fileText
           }
@@ -387,7 +454,7 @@ export function analyzeSessionMessages(
         const reasoningBefore = reasoningEntries.reduce((s, e) => s + e.tokens, 0)
         syntheticTokensBeforeFirstAssistant = syntheticEntries.reduce((s, e) => s + e.tokens, 0)
         conversationTokensBeforeFirstAssistant = userBefore + assistantBefore + toolBefore + reasoningBefore
-        log("analyze: first nonzero assistant", msgId, "conversationBefore =", conversationTokensBeforeFirstAssistant, "(user =", userBefore, "assistant =", assistantBefore, "tool =", toolBefore, "reasoning =", reasoningBefore, ") input =", info.tokens.input, "cache.read =", info.tokens?.cache?.read ?? 0, "cache.write =", info.tokens?.cache?.write ?? 0)
+        log("analyze: first nonzero assistant", msgId, "conversationBefore =", conversationTokensBeforeFirstAssistant, "(user =", userBefore, "assistant =", assistantBefore, "tool =", toolBefore, "reasoning =", reasoningBefore, ") input =", info.tokens?.input ?? 0, "cache.read =", info.tokens?.cache?.read ?? 0, "cache.write =", info.tokens?.cache?.write ?? 0)
       }
 
       // Accumulate reasoning telemetry (provider-reported, exact).
@@ -421,7 +488,15 @@ export function analyzeSessionMessages(
             (toolMap.get(toolName) ?? 0) + tokensCount,
           )
           let previewTitle: string | undefined = undefined
-          const inputResult = summarizeToolInput(toolName, part.state?.input)
+          // `state.input` is structurally unknown on the part; summarizeToolInput
+          // only reads it when it is a plain (non-array) object, so narrow first.
+          const stateInput = part.state?.input
+          const inputResult = summarizeToolInput(
+            toolName,
+            stateInput && typeof stateInput === "object" && !Array.isArray(stateInput)
+              ? (stateInput as Record<string, unknown>)
+              : undefined,
+          )
           if (inputResult !== null) {
             const pathLikeKeys = ["filePath", "path", "pattern"]
             if (pathLikeKeys.includes(inputResult.key) && (inputResult.value.includes("/") || inputResult.value.includes("\\"))) {
@@ -534,7 +609,7 @@ export function analyzeSessionMessages(
 
   // Always compute Tier 2 raw when telemetry is available (no clean gate)
   if (firstNonzeroAssistant !== null && !sessionWasCompacted) {
-    const info = firstNonzeroAssistant?.info as any
+    const info = firstNonzeroAssistant.info
     const raw = rawPromptTokens(info?.tokens ?? {})
     const conversationBefore = conversationTokensBeforeFirstAssistant ?? 0
     tier2SystemWithTools = Math.max(0, raw - conversationBefore)

@@ -46,7 +46,10 @@ where it can answer the query:
 It does **not** expose historical per-model usage across arbitrary periods, which
 `/usage` needs. That feature **retains a read-only SQLite fallback**
 (`model-usage/db.ts`, selected by `model-usage/v2/backend.ts`) with explicit
-degradation when no database is present. The retained fallback and other
+degradation when no database is present. The plugin opens OpenCode's database
+`readonly: true` on every path (v1 and v2) — it never writes, and it **never
+creates or modifies indexes**. Any index already present in an installed DB is
+simply used; queries remain correct without one. The retained fallback and other
 unsupported/unstable areas are documented in
 `docs/opencode-v1-to-v2-migration.md`.
 
