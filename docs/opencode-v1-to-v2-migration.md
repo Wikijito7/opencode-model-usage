@@ -2,7 +2,8 @@
 
 > **Status: the v2 migration baseline is committed locally on branch `v2`
 > (commit `b69419f`); deployment is still pending.** The follow-up,
-> reviewer-driven fixes, their tests, and the wlib submodule bump are present as
+> reviewer-driven fixes, the schema-aware `/usage` SQLite fix (v1/v2/hybrid
+> detection), their tests, and the wlib submodule bump are present as
 > **uncommitted working-tree changes** on branch `v2` and are not yet approved.
 > Nothing has been pushed or opened as a PR for `opencode-model-usage` yet, and
 > final review/QA approval is **pending**. Nothing is deployed, installed, or
@@ -304,7 +305,7 @@ disagree:**
 - **wlib is a git submodule, not an npm dependency.** The real version is the
   gitlink commit recorded by the parent repo (`.gitmodules` + index), not
   anything in a lockfile. Current pin in the model-usage consumer:
-  `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`, the canonical v2
+  `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`, the canonical v2
   commit). (persona-injector's pin is tracked separately.)
 - **No tracked `package.json` or lockfile exists** in any of the three repos on
   the `v2` branch. The runtime API (`@opencode-ai/plugin@1.4.1` per issue #34) is
@@ -319,7 +320,7 @@ disagree:**
 
 - [ ] Bump the submodule in persona-injector to a v2-containing commit (issue #4:
       only after v2 wlib tests pass). model-usage is already bumped to
-      `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`) as an uncommitted
+      `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`) as an uncommitted
       working-tree change (§13.1).
 - [ ] `git submodule update --init --recursive` and verify with
       `git submodule status`.
@@ -356,7 +357,7 @@ disagree:**
 - [ ] persona-injector v2 complete; ports `wlib`; tests + typecheck green.
 - [ ] model-usage v2 complete; ports `wlib`; tests + typecheck green.
 - [ ] Submodule consumers bumped to the v2 wlib commit (model-usage is pinned at
-      `544670f5b680046d39ef2f2a67cd2226d1e1e257`, `origin/v2`).
+      `34cae7a71f118ee148a65a2e66099997ed0483c5`, `origin/v2`).
 - [ ] `tui.json` → `cli.json` `plugins` migration verified (TUI-only list;
       `opencode.json(c)` `plugins` remains the server/config list).
 - [ ] A **separate v2 config root** prepared (distinct from the v1 root) so v1's
@@ -380,10 +381,39 @@ with `bun:sqlite` (`readonly: true`) and queries `session` / message tables;
 `model-usage/cache.ts` keeps persistent month/week/day caches; the server writes
 `system-tokens.json` and `tool-defs.json`.
 
+**Schema-aware historical queries (v1 / v2 / hybrid):** OpenCode ships two
+database generations, and `db.ts` now detects which one(s) a database exposes
+rather than assuming v1:
+
+| Generation | Message table | Session table | Assistant usage location |
+| --- | --- | --- | --- |
+| v1 | `message` (`data.role = 'assistant'`) | `session` | `data.modelID`, `data.providerID`, `data.cost`, `data.tokens.input\|output` |
+| v2 (2.0.27) | `session_message` (`type = 'assistant'`) | `session_v2` | `data.model.id`, `data.model.providerID`, `data.cost`, `data.tokens.input\|output` |
+
+Detection uses `pragma_table_info` only (a read) plus a `MAX(time_created)`
+probe per message/session table pair; it never issues DDL or a write. The
+selection strategy is:
+
+1. **Pure v1** (`message` + `session`) → v1 queries, unchanged behaviour.
+2. **Pure v2** (`session_message` + `session_v2`) → v2 queries.
+3. **Hybrid** (both present, e.g. a v1 DB migrated in place) → the pair with the
+   later `MAX(time_created)` is treated as the active/newer dataset and is read
+   first; the other pair is a **fallback used only when the primary has no rows
+   in the requested window**. The two datasets are never summed, so a hybrid DB
+   is not double-counted.
+4. **Unsupported** (neither pair, or a table missing required columns) → the
+   affected query returns an empty result (`[]`, `null`, or an empty
+   `UsageData`) instead of surfacing a raw SQLite `no such table` error.
+
+Every `/usage` view is preserved across both schema generations: period/model
+totals, raw rows, daily totals/trends, the session leaderboard, and the earliest
+usage date. `loadBaseline` (the `session_context_epoch` reader) is unchanged.
+
 **No DB mutation / no index creation:** every runtime path (v1 and v2) opens the
 OpenCode database read-only. The plugin **never writes to it and never creates or
-modifies indexes**. An earlier v1-only path called `ensureMessageTimeIndex`,
-which opened a second read-write connection and ran
+modifies indexes**, and the schema-aware queries issue only `SELECT`s. An earlier
+v1-only path called `ensureMessageTimeIndex`, which opened a second read-write
+connection and ran
 `CREATE INDEX IF NOT EXISTS message_time_created_idx ON message(time_created)`;
 that call and helper were removed. Queries rely on whatever indexes the installed
 DB already has and remain correct without one; installs that already created the
@@ -403,10 +433,15 @@ index keep using it.
 
 Checklist:
 
-- [ ] Map each `db.ts` query to a v2 `ctx.data`/client source; list gaps.
-- [ ] Add fallback + error surface for unavailable history.
+- [x] Map each `db.ts` query to a v2 `ctx.data`/client source; list gaps.
+      Historical per-period aggregation has no v2 API on 2.0.27, so the read-only
+      SQLite layer is retained for all five `/usage` views.
+- [x] Add fallback + error surface for unavailable history.
 - [ ] Decide `ctx.storage` vs retained JSON for caches.
-- [ ] Keep domain layer free of SQLite/host imports.
+- [x] Keep domain layer free of SQLite/host imports.
+- [x] Make the historical query layer schema-aware (`detectUsageSchema` +
+      v1/v2/hybrid source selection in `db.ts`) so a 2.0.27 v2-only database no
+      longer fails with `no such table: message`.
 
 ---
 
@@ -463,7 +498,7 @@ Checklist:
   reference package is `@opencode/plugin/tui`. Treat the reference as
   authoritative unless the Coordinator says otherwise.
 - **notifications repository:** location and scope unknown (§10).
-- **Submodule pin** is `544670f5b680046d39ef2f2a67cd2226d1e1e257` (`origin/v2`) in
+- **Submodule pin** is `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`) in
   model-usage (§6); persona-injector's pin is tracked separately.
 
 ---
@@ -487,17 +522,17 @@ Checklist:
 
 This section records what was implemented on the local `v2` branch. The
 implementation baseline is **committed locally** at `b69419f`; the follow-up,
-reviewer-driven fixes, their tests, and the wlib submodule bump are
-**uncommitted working-tree changes** and are not yet approved. Nothing has been
-pushed or opened as a PR for `opencode-model-usage` yet, final review/QA approval
-is **pending**, and deployment, install, and live `opencode2` verification are
-still pending (§8).
+reviewer-driven fixes, the schema-aware `/usage` SQLite fix, their tests, and the
+wlib submodule bump are **uncommitted working-tree changes** and are not yet
+approved. Nothing has been pushed or opened as a PR for `opencode-model-usage`
+yet, final review/QA approval is **pending**, and deployment, install, and live
+`opencode2` verification are still pending (§8).
 
 ### 13.1 wlib foundation pin
 
 - `model-usage/wlib` submodule updated to the canonical v2 commit
-  **`544670f5b680046d39ef2f2a67cd2226d1e1e257`**
-  (`Correct v2 renderer API to read live terminal geometry`), pushed to the
+  **`34cae7a71f118ee148a65a2e66099997ed0483c5`**
+  (`Default v2 keymap layers to global mode`), pushed to the
   submodule remote (`origin/v2`).
 - Fetched from the submodule remote `origin/v2`; no package install occurred.
 - The v2 host adapter lives at `model-usage/wlib/src/host/v2.ts`
@@ -554,9 +589,16 @@ contract and the `/analyze` reader keep working).
   is isolated in `v2/backend.ts` and degrades to an explicit "unavailable" view.
   The SQLite access is strictly read-only: the plugin never writes to the DB and
   never creates or modifies indexes (see §9).
+- **Schema-aware fallback:** `db.ts` detects v1 (`message`/`session`), v2
+  (`session_message`/`session_v2`), or hybrid databases and reads the newest
+  active dataset first, falling back to the other only when the primary has no
+  rows in range (never summing both). Unsupported schemas return empty results
+  instead of a raw `no such table` error. Assistant usage is read from
+  `data.modelID`/`data.providerID` (v1) or `data.model.id`/`data.model.providerID`
+  (v2), plus `data.cost` and `data.tokens.*` in both (see §9).
 - **Unsupported / unstable (documented, not silently broken):** no v2 historical
-  aggregation; `/usage` depends on OpenCode's SQLite schema
-  (`message.data` JSON `modelID`/`providerID`/`cost`/`tokens`, `session` table).
+  aggregation; `/usage` still depends on OpenCode's SQLite schema, now across
+  both the v1 and v2 generations.
 
 ### 13.6 v1 compatibility + deployment selection
 

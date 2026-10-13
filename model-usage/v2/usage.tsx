@@ -56,7 +56,7 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
       const dbPath = SQLITE_DB_PATH
       const now = new Date()
 
-      const { fg, muted, red, panel, primary } = host.theme()
+      const { fg, muted, red, panel, primary, selectedText } = host.theme()
 
       // Historical aggregation is only available from the retained SQLite
       // fallback on 2.0.27; the v2 data API does not expose it. Availability
@@ -76,10 +76,19 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
               ? "The OpenCode database file exists but is not a valid SQLite database."
               : "No OpenCode database was found at the expected location."
         host.dialog.show(() => (
-          <box padding={2} flexDirection="column" gap={1}>
-            <text fg={red}><b>Usage Data Unavailable</b></text>
-            <text fg={muted}>{reason}</text>
-            <text fg={muted}>{`Looked for: ${dbPath}`}</text>
+          <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
+            <box flexDirection="row" justifyContent="space-between">
+              <box flexDirection="row" gap={1}>
+                <text fg={fg}><b>Usage</b></text>
+                <text fg={muted}>{"\u2014"} Data unavailable</text>
+              </box>
+              <text fg={muted}>esc</text>
+            </box>
+            <box flexDirection="column" gap={1}>
+              <text fg={red}><b>Usage Data Unavailable</b></text>
+              <text fg={muted}>{reason}</text>
+              <text fg={muted}>{`Looked for: ${dbPath}`}</text>
+            </box>
           </box>
         ))
         host.dialog.set({ size: "medium" })
@@ -89,10 +98,19 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
       const { db: openedDb, error: openError } = openUsageDatabase(dbPath)
       if (!openedDb) {
         host.dialog.show(() => (
-          <box padding={2} flexDirection="column" gap={1}>
-            <text fg={red}><b>Usage Data Unavailable</b></text>
-            <text fg={muted}>Could not open database.</text>
-            <text fg={muted}>{openError ?? "Unknown error"}</text>
+          <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="column" gap={1}>
+            <box flexDirection="row" justifyContent="space-between">
+              <box flexDirection="row" gap={1}>
+                <text fg={fg}><b>Usage</b></text>
+                <text fg={muted}>{"\u2014"} Data unavailable</text>
+              </box>
+              <text fg={muted}>esc</text>
+            </box>
+            <box flexDirection="column" gap={1}>
+              <text fg={red}><b>Usage Data Unavailable</b></text>
+              <text fg={muted}>Could not open database.</text>
+              <text fg={muted}>{openError ?? "Unknown error"}</text>
+            </box>
           </box>
         ))
         host.dialog.set({ size: "medium" })
@@ -728,8 +746,8 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
                         const selected = i === selectedSessionIdx()
                         const title = s.title || "(untitled)"
                         return (
-                          <box key={s.id} data-session-idx={i} flexDirection="column" gap={0}>
-                            <text fg={selected ? primary : fg}>{i + 1}. {title}</text>
+                          <box key={s.id} data-session-idx={i} flexDirection="column" gap={0} paddingLeft={1} paddingRight={1} backgroundColor={selected ? primary : undefined}>
+                            <text fg={selected ? selectedText : muted}>{i + 1}. {title}</text>
                             <text fg={muted}>
                               {fmt(s.tokens)} tokens{s.cost > 0 ? ` \u2014 ${fmtCost(s.cost)}` : ""}{s.subagentCount > 0 ? ` \u00b7 ${s.subagentCount} subagents` : ""}
                             </text>

@@ -49,9 +49,17 @@ It does **not** expose historical per-model usage across arbitrary periods, whic
 degradation when no database is present. The plugin opens OpenCode's database
 `readonly: true` on every path (v1 and v2) — it never writes, and it **never
 creates or modifies indexes**. Any index already present in an installed DB is
-simply used; queries remain correct without one. The retained fallback and other
-unsupported/unstable areas are documented in
-`docs/opencode-v1-to-v2-migration.md`.
+simply used; queries remain correct without one.
+
+The query layer is **schema-aware**. It detects the historical schema from the
+tables present (v1 `message`/`session`; v2 `session_message`/`session_v2`, whose
+assistant usage lives in `data.model.id`, `data.model.providerID`, `data.cost`,
+`data.tokens.*`). A pure-v1, pure-v2, or hybrid database (both generations, e.g.
+after a v1→v2 migration leaves the old tables behind) all work: `/usage` reads
+the **newest active dataset** first and only falls back to the other when it has
+no rows in the requested window, so a hybrid DB is never double-counted. A
+database with an unrecognised schema degrades to an empty view rather than a raw
+`no such table` error. See `docs/opencode-v1-to-v2-migration.md`.
 
 ## Features
 
