@@ -67,7 +67,7 @@ Feature-specific serializers (usage, analyze, …) live in the consuming plugin,
 
 ## Submodule upkeep
 
-- Current pin: `34cae7a71f118ee148a65a2e66099997ed0483c5` (canonical v2 commit — `WlibHost` + `src/host/{v1,v2}`; defaults v2 keymap layers to global mode).
+- Current pin: `f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4` (canonical v2 commit — `WlibHost` + `src/host/{v1,v2}`; fixes v2 semantic theme selection and persists export overlays).
 - Bump: `git submodule update --remote --merge` at repo root, then commit the pointer change.
 - The canonical branch is `origin/v2` (the pin tracks it). If the submodule working tree is dirty and the merge refuses: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib reset --hard origin/v2` (only after confirming no local work).
 - Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).

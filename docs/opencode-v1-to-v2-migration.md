@@ -305,7 +305,7 @@ disagree:**
 - **wlib is a git submodule, not an npm dependency.** The real version is the
   gitlink commit recorded by the parent repo (`.gitmodules` + index), not
   anything in a lockfile. Current pin in the model-usage consumer:
-  `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`, the canonical v2
+  `f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4` (`origin/v2`, the canonical v2
   commit). (persona-injector's pin is tracked separately.)
 - **No tracked `package.json` or lockfile exists** in any of the three repos on
   the `v2` branch. The runtime API (`@opencode-ai/plugin@1.4.1` per issue #34) is
@@ -320,7 +320,7 @@ disagree:**
 
 - [ ] Bump the submodule in persona-injector to a v2-containing commit (issue #4:
       only after v2 wlib tests pass). model-usage is already bumped to
-      `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`) as an uncommitted
+      `f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4` (`origin/v2`) as an uncommitted
       working-tree change (§13.1).
 - [ ] `git submodule update --init --recursive` and verify with
       `git submodule status`.
@@ -357,7 +357,7 @@ disagree:**
 - [ ] persona-injector v2 complete; ports `wlib`; tests + typecheck green.
 - [ ] model-usage v2 complete; ports `wlib`; tests + typecheck green.
 - [ ] Submodule consumers bumped to the v2 wlib commit (model-usage is pinned at
-      `34cae7a71f118ee148a65a2e66099997ed0483c5`, `origin/v2`).
+      `f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4`, `origin/v2`).
 - [ ] `tui.json` → `cli.json` `plugins` migration verified (TUI-only list;
       `opencode.json(c)` `plugins` remains the server/config list).
 - [ ] A **separate v2 config root** prepared (distinct from the v1 root) so v1's
@@ -498,7 +498,7 @@ Checklist:
   reference package is `@opencode/plugin/tui`. Treat the reference as
   authoritative unless the Coordinator says otherwise.
 - **notifications repository:** location and scope unknown (§10).
-- **Submodule pin** is `34cae7a71f118ee148a65a2e66099997ed0483c5` (`origin/v2`) in
+- **Submodule pin** is `f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4` (`origin/v2`) in
   model-usage (§6); persona-injector's pin is tracked separately.
 
 ---
@@ -531,8 +531,8 @@ yet, final review/QA approval is **pending**, and deployment, install, and live
 ### 13.1 wlib foundation pin
 
 - `model-usage/wlib` submodule updated to the canonical v2 commit
-  **`34cae7a71f118ee148a65a2e66099997ed0483c5`**
-  (`Default v2 keymap layers to global mode`), pushed to the
+  **`f95b73e3bd35be227d2cbfe8ca61bfee40e6dce4`**
+  (`Fix v2 semantic theme selection and persist export overlays`), pushed to the
   submodule remote (`origin/v2`).
 - Fetched from the submodule remote `origin/v2`; no package install occurred.
 - The v2 host adapter lives at `model-usage/wlib/src/host/v2.ts`
