@@ -62,7 +62,7 @@ export function summarizeCompactions(events: readonly CompactionEvent[]): Compac
  * - Title-gen stubs (rawPromptTokens === 0) are skipped for backfill and
  *   lastAssistantRawPrompt tracking.
  */
-export function resolveCompactionEvents(messages: any[]): { events: CompactionEvent[], summary: CompactionSummary } {
+export function resolveCompactionEvents(messages: readonly any[]): { events: CompactionEvent[], summary: CompactionSummary } {
   const events: CompactionEvent[] = []
   let lastAssistantRawPrompt: number | undefined = undefined
 
