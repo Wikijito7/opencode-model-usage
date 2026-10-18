@@ -36,6 +36,7 @@ import { buildHelpRows } from "../wlib/src/core/help"
 import { HelpOverlay } from "../wlib/src/ui/help-overlay"
 import { EXPORT_FORMATS, type Exportable } from "../wlib/src/core/export"
 import { createExportController, type ExportController } from "../wlib/src/ui/export-controller"
+import { createOwnedInstance } from "../wlib/src/ui/owned-instance"
 import { CopiedFlash } from "../wlib/src/ui/copied-flash"
 import { buildExport, buildExportData, type ExportPeriod } from "../helpers/export/usage"
 import { useDialogSizing } from "../wlib/src/ui/dialog"
@@ -56,7 +57,7 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
       const dbPath = SQLITE_DB_PATH
       const now = new Date()
 
-      const { fg, muted, red, panel, primary, selectedText } = host.theme()
+      const { fg, muted, red, panel, primary } = host.theme()
 
       // Historical aggregation is only available from the retained SQLite
       // fallback on 2.0.27; the v2 data API does not expose it. Availability
@@ -450,10 +451,21 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
           return buildExport(format, exportData)
         },
       }
-      let exporter: ExportController | null = null
+      // The export controller must be materialized on the dialog's first
+      // render, not here: it registers a createEffect that reads
+      // `context.keymap.layer`, and that provider only exists inside the render
+      // callback. The owner is constructed now but stays inert until `.get()`
+      // runs inside the callback, where the standalone createRoot it creates
+      // inherits the Keymap.Provider context and outlives render-callback
+      // re-runs. `exporter` (assigned at the top of the callback) is the same
+      // instance across re-runs. Disposed via the dialog's onClose.
+      const exporterOwner = createOwnedInstance(() =>
+        createExportController(host, exportable, { name: "usage" }),
+      )
+      let exporter!: ExportController
 
       function handleKey(key: string) {
-        if (exporter?.handleKey(key)) return true
+        if (exporter.handleKey(key)) return true
         if (showHelp()) {
           if (key === "h" || key === "escape") {
             setShowHelp(false)
@@ -469,7 +481,7 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
           return true
         }
         if (key === "e") {
-          exporter?.open()
+          exporter.open()
           return true
         }
         if (key === "escape") {
@@ -622,10 +634,10 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
       }
 
       host.dialog.show(() => {
-        // The export controller must be created inside this Solid owner so its
-        // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
-        // disposed when the dialog closes.
-        exporter = createExportController(host, exportable, { name: "usage" })
+        // Materialize the export controller here, inside this render, so its
+        // createRoot inherits the dialog's Keymap.Provider context; subsequent
+        // re-runs reuse the same instance.
+        exporter = exporterOwner.get()
         // Desired large/40 — falls back to fit the terminal (never cut off).
         const dialogSizing = useDialogSizing(host, { size: "large", maxHeight: 40 })
         const geom = host.renderer.read()
@@ -746,8 +758,8 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
                         const selected = i === selectedSessionIdx()
                         const title = s.title || "(untitled)"
                         return (
-                          <box key={s.id} data-session-idx={i} flexDirection="column" gap={0} paddingLeft={1} paddingRight={1} backgroundColor={selected ? primary : undefined}>
-                            <text fg={selected ? selectedText : muted}>{i + 1}. {title}</text>
+                          <box key={s.id} data-session-idx={i} flexDirection="column" gap={0}>
+                            <text fg={selected ? primary : fg}>{i + 1}. {title}</text>
                             <text fg={muted}>
                               {fmt(s.tokens)} tokens{s.cost > 0 ? ` \u2014 ${fmtCost(s.cost)}` : ""}{s.subagentCount > 0 ? ` \u00b7 ${s.subagentCount} subagents` : ""}
                             </text>
@@ -883,7 +895,7 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
                   </>
                 )}
                 <text fg={muted}>·</text>
-                <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
+                <CopiedFlash copied={exporter.copiedFlash()} hint="e export" muted={muted} primary={primary} />
                 <text fg={muted}>·</text>
                 <text fg={muted}>h</text>
                 <text fg={muted}>help</text>
@@ -893,11 +905,14 @@ export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
           {showHelp() && (
             <HelpOverlay rows={buildHelpRows(usageBindings)} fg={fg} muted={muted} bg={panel} title="Usage Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
           )}
-          {exporter!.renderOverlay()}
-          {exporter!.renderResultOverlay()}
+          {exporter.renderOverlay()}
+          {exporter.renderResultOverlay()}
           </>
         )
       }, () => {
+        // Tear down the stable export-controller owner exactly once, covering
+        // escape, replacement (e.g. opening /analyze), and clear/close.
+        exporterOwner.dispose()
         cleanedUp = true
         if (cleanupKeyLayer) {
           try { cleanupKeyLayer() } catch { /* ignore */ }

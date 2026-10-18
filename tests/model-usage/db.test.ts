@@ -1160,6 +1160,176 @@ describe("hybrid schema source selection", () => {
   })
 })
 
+// ─── Mixed-family source selection (independent generations) ─────────────────
+//
+// `db.ts` resolves the message family (`message` vs `session_message`) and the
+// session family (`session` vs `session_v2`) *independently*: each picks its own
+// primary by MAX(time_created) and falls back to its own secondary only when the
+// primary has no rows in the window. These tests pin the case where the two
+// families resolve to DIFFERENT generations — a regression guard against a
+// single global generation choice, and against cross-family row merging or
+// double counting.
+
+describe("mixed-family source selection (independent generations)", () => {
+  let setup: TestDb
+
+  const RANGE_START = Date.UTC(2026, 6, 6, 0, 0, 0)
+  const RANGE_END = RANGE_START + V2_DAY
+
+  afterEach(() => {
+    setup?.cleanup()
+  })
+
+  it("v2 message family primary while v1 session family primary: each query family chooses independently", () => {
+    setup = setupHybridDb()
+
+    // Message family — v2 (`session_message`) is the newer dataset.
+    insertMessage(setup.dbPath, RANGE_START + 1000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.11, tokens: { input: 100, output: 50 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 5000, "assistant",
+      v2Data("claude-3", "anthropic", 0.22, 10, 5),
+    )
+
+    // Session family — v1 (`session`) is the newer dataset.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 6000, {
+      title: "v1", cost: 0.5, tokensInput: 100, tokensOutput: 100,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 2000, {
+      title: "v2", cost: 0.9, tokensInput: 10, tokensOutput: 10,
+    })
+
+    // ── Message-family queries read the v2 dataset ────────────────────────
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1) // exactly one row — no double count
+    expect(rows[0].model_id).toBe("claude-3")
+    expect(rows[0].cost).toBeCloseTo(0.22, 6)
+    expect(rows[0].input_tokens).toBe(10)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.22, 6)
+    expect(usage.totalInput).toBe(10)
+    expect(usage.totalOutput).toBe(5)
+    expect(usage.models).toHaveLength(1)
+    expect(usage.models[0].modelID).toBe("claude-3")
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in daily) throw new Error("expected daily totals")
+    expect(daily).toHaveLength(1)
+    expect(daily[0].input_tokens).toBe(10)
+    expect(daily[0].output_tokens).toBe(5)
+    expect(daily[0].cost).toBeCloseTo(0.22, 6)
+
+    // ── Session-family queries read the v1 dataset ───────────────────────
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1) // not merged with v2 session family
+    expect(tops.sessions[0].id).toBe("v1-root")
+    expect(tops.sessions[0].cost).toBeCloseTo(0.5, 6)
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 6000])
+  })
+
+  it("inverse: v1 message family primary while v2 session family primary: each query family chooses independently", () => {
+    setup = setupHybridDb()
+
+    // Message family — v1 (`message`) is the newer dataset.
+    insertMessage(setup.dbPath, RANGE_START + 5000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.33, tokens: { input: 30, output: 40 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 1000, "assistant",
+      v2Data("claude-3", "anthropic", 0.44, 4, 4),
+    )
+
+    // Session family — v2 (`session_v2`) is the newer dataset.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 2000, {
+      title: "v1", cost: 0.1, tokensInput: 10, tokensOutput: 10,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 6000, {
+      title: "v2", cost: 0.7, tokensInput: 700, tokensOutput: 700,
+    })
+
+    // ── Message-family queries read the v1 dataset ────────────────────────
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1) // exactly one row — no double count
+    expect(rows[0].model_id).toBe("gpt-4")
+    expect(rows[0].cost).toBeCloseTo(0.33, 6)
+    expect(rows[0].input_tokens).toBe(30)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.33, 6)
+    expect(usage.totalInput).toBe(30)
+    expect(usage.totalOutput).toBe(40)
+    expect(usage.models).toHaveLength(1)
+    expect(usage.models[0].modelID).toBe("gpt-4")
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in daily) throw new Error("expected daily totals")
+    expect(daily).toHaveLength(1)
+    expect(daily[0].input_tokens).toBe(30)
+    expect(daily[0].output_tokens).toBe(40)
+    expect(daily[0].cost).toBeCloseTo(0.33, 6)
+
+    // ── Session-family queries read the v2 dataset ───────────────────────
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "tokens")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1) // not merged with v1 session family
+    expect(tops.sessions[0].id).toBe("v2-root")
+    expect(tops.sessions[0].cost).toBeCloseTo(0.7, 6)
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 6000])
+  })
+
+  it("each family falls back to its own secondary when its primary has no rows in the window", () => {
+    setup = setupHybridDb()
+
+    // Message family: v2 is globally newest (primary) but empty in the window,
+    // so the message queries must fall back to v1 — independently of sessions.
+    insertMessage(setup.dbPath, RANGE_START + 1000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.11, tokens: { input: 100, output: 50 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 10 * V2_DAY, "assistant",
+      v2Data("claude-3", "anthropic", 0.22, 10, 5),
+    )
+
+    // Session family: v1 is globally newest (primary) but empty in the window,
+    // so the session queries must fall back to v2.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 10 * V2_DAY, {
+      title: "v1", cost: 0.5,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 2000, {
+      title: "v2", cost: 0.9,
+    })
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].model_id).toBe("gpt-4")
+    expect(rows[0].input_tokens).toBe(100)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalInput).toBe(100)
+
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1)
+    expect(tops.sessions[0].id).toBe("v2-root")
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 2000])
+  })
+})
+
 // ─── Unsupported / malformed schema ──────────────────────────────────────────
 
 describe("unsupported and malformed schemas", () => {

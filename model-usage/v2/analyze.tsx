@@ -33,7 +33,8 @@ import { useDialogSizing } from "../wlib/src/ui/dialog"
 import { buildHelpRows } from "../wlib/src/core/help"
 import { HelpOverlay } from "../wlib/src/ui/help-overlay"
 import { type Exportable } from "../wlib/src/core/export"
-import { createExportController, type ExportController } from "../wlib/src/ui/export-controller"
+import { createExportController } from "../wlib/src/ui/export-controller"
+import { createOwnedInstance } from "../wlib/src/ui/owned-instance"
 import { CopiedFlash } from "../wlib/src/ui/copied-flash"
 import { buildAnalyzeExport, buildAnalyzeExportData, ANALYZE_EXPORT_FORMATS } from "../helpers/export/analyze"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "../version"
@@ -147,7 +148,16 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
       return buildAnalyzeExport(format, buildAnalyzeExportData(analysis, sessionID))
     },
   }
-  let exporter: ExportController | null = null
+  // The export controller is materialized lazily on the dialog's first render
+  // (inside `host.dialog.show` below), not here: it registers a createEffect
+  // that reads `context.keymap.layer`, and that provider only exists inside the
+  // render callback. The owner is constructed now but stays inert until `.get()`
+  // runs there, where the standalone createRoot it creates inherits the
+  // Keymap.Provider context and outlives render-callback re-runs. Disposed via
+  // the dialog's onClose.
+  const exporterOwner = createOwnedInstance(() =>
+    createExportController(host, exportable, { name: "analyze" }),
+  )
 
   const analyzeBindings: KeyBinding[] = [
     { key: "left",     cmd: "analyze.tabLeft",     desc: "Previous tab" },
@@ -234,6 +244,10 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
 
   // ── Reactive dialog ──────────────────────────────────────────────
   host.dialog.show(() => {
+    // Materialize the export controller here, inside this render, so its
+    // createRoot inherits the dialog's Keymap.Provider context; subsequent
+    // re-runs reuse the same instance.
+    const exporter = exporterOwner.get()
     const dialogSizing = useDialogSizing(host, { size: "large", maxHeight: 40 })
     const geom = host.renderer.read()
     log(
@@ -277,10 +291,8 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
       }
     }
 
-    exporter = createExportController(host, exportable, { name: "analyze" })
-
     function handleKey(key: string) {
-      if (exporter?.handleKey(key)) return true
+      if (exporter.handleKey(key)) return true
       if (showHelp()) {
         if (key === "h" || key === "escape") {
           setShowHelp(false)
@@ -288,7 +300,7 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
         return true
       }
       if (key === "e") {
-        exporter?.open()
+        exporter.open()
         return true
       }
       if (key === "h") {
@@ -768,7 +780,7 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
               )}
               <text fg={muted}>·  r reload</text>
               <text fg={muted}>·</text>
-              <CopiedFlash copied={exporter!.copiedFlash()} hint="e export" muted={muted} primary={primary} />
+              <CopiedFlash copied={exporter.copiedFlash()} hint="e export" muted={muted} primary={primary} />
               <text fg={muted}>·  h help</text>
             </box>
           )
@@ -777,10 +789,14 @@ export function openAnalyze(context: Plugin.Context, host: WlibHost, sessionID: 
       {showHelp() && (
         <HelpOverlay rows={buildHelpRows(analyzeBindings)} fg={fg} muted={muted} bg={panel} title="Analyze Shortcuts" name={PLUGIN_NAME} version={PLUGIN_VERSION} />
       )}
-      {exporter!.renderOverlay()}
-      {exporter!.renderResultOverlay()}
+      {exporter.renderOverlay()}
+      {exporter.renderResultOverlay()}
       </>
     )
+  }, () => {
+    // Tear down the stable export-controller owner exactly once, covering
+    // escape, replacement, and clear/close.
+    exporterOwner.dispose()
   })
 }
 

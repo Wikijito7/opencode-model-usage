@@ -1,13 +1,15 @@
 /** @jsxImportSource @opentui/solid */
 /**
- * DEPRECATED — OpenCode v1 TUI entrypoint.
+ * OpenCode v1 TUI entrypoint (flat root file).
  *
- * Retained for the transition window only. The supported production entrypoint
- * is the v2 plugin directory (`./model-usage/tui.tsx` + `./model-usage/server.ts`,
- * resolved by OpenCode 2.0.27's plugin discovery). This file is a loose plugin
- * source registered through v1 `tui.json`; OpenCode v2 discovery only loads a
- * plugin **directory's** `tui`/`server` entrypoints, so this file is never
- * auto-loaded by v2.
+ * Registered explicitly through v1 `tui.json`
+ * (`{ "plugin": ["./plugins/model-usage.tsx"] }`). The supported v2 TUI
+ * entrypoint is the `model-usage/` directory's `tui.tsx`; the shared v1/v2
+ * server entry is the flat root `model-usage-server.ts` (default
+ * `{ id, server, setup }`) — the plugin directory deliberately has no
+ * package-root `server.ts`/`index.ts`, so v2 does not load a second server.
+ * This file is a loose bare `.tsx` file, which v2's directory-only TUI discovery
+ * never loads.
  *
  * It builds the deprecated wlib v1 host adapter once (`createV1Host`) and passes
  * it to the v1 dialogs alongside the raw `TuiPluginApi`. v1 and v2 host APIs are

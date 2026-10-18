@@ -3,17 +3,19 @@ import { estimateTokens } from "@model-usage/helpers/tokens"
 import { splitSystemFragments } from "@model-usage/helpers/fragments"
 import type { SystemSnapshot, ToolDefSnapshot } from "@model-usage/types"
 
-// `model-usage/server.ts` imports the host API `@opencode/plugin`, which is not
-// resolvable inside `bun test` (it lives in Bun's install cache and is only
-// auto-resolved for non-test execution). The helpers under test are pure; we
-// stub the host module (test-only, production untouched) and load server.ts
-// dynamically so its exports can be exercised without a running host.
-type ServerModule = typeof import("@model-usage/server")
+// The v2 helper lives at `model-usage/server-setup.ts` (non-entrypoint; the
+// combined entry is the flat root `model-usage-server.ts`). Its only host
+// reference is a **type-only** `@opencode/plugin` import, which is erased at
+// runtime, so these pure helpers load without a running host. The host module
+// stub is kept as a defensive no-op (test-only, production untouched) in case a
+// future refactor reintroduces a runtime host import, and the helper is loaded
+// dynamically so its non-entrypoint exports can be exercised.
+type ServerModule = typeof import("@model-usage/server-setup")
 let server: ServerModule
 
 beforeAll(async () => {
   mock.module("@opencode/plugin", () => ({ Plugin: { define: (config: unknown) => config } }))
-  server = await import("@model-usage/server")
+  server = await import("@model-usage/server-setup")
 })
 
 // ─── isTitleGenerator ─────────────────────────────────────────────────────────

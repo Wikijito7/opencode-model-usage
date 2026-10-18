@@ -31,7 +31,8 @@ bun test
 | `model-usage/analyze-domain.ts` | `tests/model-usage/analyze-domain.test.ts` |
 | `model-usage/helpers/fragments.ts` | `tests/model-usage/analyze.test.ts` |
 | `model-usage/db.ts` / `cache.ts` | `tests/model-usage/db.test.ts` / `cache.test.ts` |
-| wlib modules | inside `model-usage/wlib/` (own test files) |
+| `model-usage/v2/{backend,message-adapter,sidebar-domain}.ts` | `tests/model-usage/v2/*.test.ts` |
+| wlib modules | inside `model-usage/wlib/test/` (own test files) |
 
 ## Conventions
 
@@ -42,6 +43,8 @@ bun test
 - **Scroll-like elements**: fake the element (`scrollBy`, `scrollHeight`, `clientHeight`, `scrollTop`) instead of importing DOM.
 - **Fragments tests**: cover the persona boundaries — 2 blank lines, 1 blank line + marker/preamble, and 0 blank lines (preamble terminates the section). Keep the legacy `jungle-mode/` marker tests.
 - **Domain tests**: reuse the `makeUserMessage` / `makeAssistantMessage` helpers from `analyze-domain.test.ts` for message streams.
+- **Schema-aware DB tests**: `db.test.ts` must cover v1 (`message`/`session`), v2 (`session_message`/`session_v2`), and hybrid databases — including that hybrid selects each table family **independently** by its own newer `MAX(time_created)` (message family and session family may resolve to different generations), reads the newer table first in each family, and falls back to the older table only when the newer has no rows in the selected window (never sums both, never a row-level merge) — and that unsupported schemas return empty results instead of throwing.
+- **wlib Solid-dependent tests**: `owned-instance.test.ts` and `export-controller.test.ts` virtualize `solid-js` (a tiny owner/effect model) and exercise the real controllers; `instance.test.ts` covers the pure `core/instance` slot without Solid.
 
 ## Reporting
 

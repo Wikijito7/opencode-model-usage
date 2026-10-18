@@ -1,10 +1,17 @@
 /**
- * model-usage — OpenCode v2 server entrypoint.
+ * model-usage — OpenCode v2 server **setup helper** (non-entrypoint).
  *
- * Target: OpenCode `2.0.27` (`@opencode/plugin` Promise API). This is the
- * supported production server plugin; the v1 server entrypoint
- * (`../model-usage-server.ts`) is deprecated and retained only for the
- * transition window.
+ * Target: OpenCode `2.0.27` (`@opencode/plugin` Promise API). This module is
+ * NOT a plugin entrypoint: it exports a plain `setup(context)` function and has
+ * **no default export**, so OpenCode v2's directory resolution does not load it
+ * as a second server plugin. The actual combined entrypoint is the root
+ * `../model-usage-server.ts`, whose default object carries `{ id, server, setup }`.
+ * The `setup` export here is threaded into that object by the root file.
+ *
+ * This module deliberately does not import `Plugin.define` (or any other
+ * runtime `@opencode/plugin` value): the root v1 entrypoint imports it, so it
+ * must stay loadable by OpenCode v1. The `@opencode/plugin` reference below is
+ * a **type-only** import (erased at runtime).
  *
  * ## Hook: `session.hook("context")`
  *
@@ -45,7 +52,7 @@
  * No TUI/JSX imports — this module is server-only.
  */
 
-import { Plugin } from "@opencode/plugin"
+import type { Plugin } from "@opencode/plugin"
 import { homedir } from "node:os"
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { estimateTokens } from "./helpers/tokens"
@@ -53,7 +60,7 @@ import { log } from "./helpers/debug"
 import { splitSystemFragments } from "./helpers/fragments"
 import type { SystemSnapshot, ToolDefSnapshot } from "./types"
 
-const PLUGIN_ID = "model-usage"
+export const PLUGIN_ID = "model-usage"
 
 const TOKENS_DIR = `${homedir()}/.config/opencode/plugins/model-usage`
 const TOKENS_FILE = `${TOKENS_DIR}/system-tokens.json`
@@ -253,41 +260,46 @@ export function mergeSystemSnapshot(
   return true
 }
 
-export default Plugin.define({
-  id: PLUGIN_ID,
-  async setup(ctx) {
-    // Load the persisted system snapshots once; the map is the write-through
-    // cache and disk remains the source of truth.
-    const cache: Record<string, SystemSnapshot> = loadTokens()
+/**
+ * OpenCode v2 server setup. Exported as a plain function so the combined root
+ * entrypoint (`../model-usage-server.ts`) can expose it as the default object's
+ * `setup` property without this module depending on `Plugin.define`.
+ *
+ * The v1 (`server`) and v2 (`setup`) implementations never share a host API:
+ * this function only ever touches the v2 `context.session` surface.
+ */
+export async function setup(ctx: Plugin.Context): Promise<void> {
+  // Load the persisted system snapshots once; the map is the write-through
+  // cache and disk remains the source of truth.
+  const cache: Record<string, SystemSnapshot> = loadTokens()
 
-    await ctx.session.hook("context", async (event) => {
-      const sessionID = event.sessionID
-      log("model-usage-server(v2): session.hook context for", sessionID,
-        "system parts:", (event.system ?? []).length,
-        "tools:", Object.keys(event.tools ?? {}).length)
-      if (!sessionID) return
+  await ctx.session.hook("context", async (event) => {
+    const sessionID = event.sessionID
+    log("model-usage-server(v2): session.hook context for", sessionID,
+      "system parts:", (event.system ?? []).length,
+      "tools:", Object.keys(event.tools ?? {}).length)
+    if (!sessionID) return
 
-      const parts = (event.system ?? []) as readonly SystemPartLike[]
-      const allText = parts.map((p) => p.text ?? "").join("\n")
-      if (isTitleGenerator(allText)) return
-      if (allText.trim().length === 0) return
+    const parts = (event.system ?? []) as readonly SystemPartLike[]
+    const allText = parts.map((p) => p.text ?? "").join("\n")
+    if (isTitleGenerator(allText)) return
+    if (allText.trim().length === 0) return
 
-      const now = Date.now()
-      const changed = mergeSystemSnapshot(cache, sessionID, allText, now)
-      if (changed) await saveTokens(cache)
+    const now = Date.now()
+    const changed = mergeSystemSnapshot(cache, sessionID, allText, now)
+    if (changed) await saveTokens(cache)
 
-      // Tool definitions: v2 delivers the complete effective set for this
-      // request, so replace (not accumulate) the session's snapshot. An empty
-      // set clears any stale snapshot rather than leaving the previous
-      // request's definitions behind. Only persist on an actual change.
-      if (toolDefsCache === null) toolDefsCache = loadToolDefs()
-      const defsChanged = applyToolDefSnapshot(toolDefsCache, sessionID, event.tools)
-      if (defsChanged) {
-        await saveToolDefs(toolDefsCache)
-        log("model-usage-server(v2): tool defs updated for", sessionID,
-          "tools:", Object.keys(event.tools ?? {}).length,
-          "stored sessions:", Object.keys(toolDefsCache).length)
-      }
-    })
-  },
-})
+    // Tool definitions: v2 delivers the complete effective set for this
+    // request, so replace (not accumulate) the session's snapshot. An empty
+    // set clears any stale snapshot rather than leaving the previous
+    // request's definitions behind. Only persist on an actual change.
+    if (toolDefsCache === null) toolDefsCache = loadToolDefs()
+    const defsChanged = applyToolDefSnapshot(toolDefsCache, sessionID, event.tools)
+    if (defsChanged) {
+      await saveToolDefs(toolDefsCache)
+      log("model-usage-server(v2): tool defs updated for", sessionID,
+        "tools:", Object.keys(event.tools ?? {}).length,
+        "stored sessions:", Object.keys(toolDefsCache).length)
+    }
+  })
+}

@@ -2,9 +2,11 @@
 /**
  * model-usage — OpenCode v2 TUI entrypoint.
  *
- * Target: OpenCode `2.0.27` (`@opencode/plugin/tui`). This is the supported
- * production TUI plugin; the v1 entrypoint (`../model-usage.tsx`) is deprecated
- * and retained only for the transition window.
+ * Target: OpenCode `2.0.27` (`@opencode/plugin/tui`). This is the `model-usage/`
+ * directory's only entrypoint — the v2 **TUI** entry. The v2 server lives in the
+ * shared flat root entry (`../model-usage-server.ts`, default `{ id, server, setup }`),
+ * so this directory has no package-root server. The v1 TUI entry is the flat
+ * `../model-usage.tsx` (registered via v1 `tui.json`).
  *
  * Wiring:
  * - builds the wlib v2 host adapter **once** (`createV2Host`) and passes it to
