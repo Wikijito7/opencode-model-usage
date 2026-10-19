@@ -15,17 +15,23 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 
 ---
 
-## Theme palette (from `wlib/theme.ts` `resolveThemeColors`)
+## Theme palette (from `wlib/src/core/theme.ts` `resolveThemeColors` / `resolveSemanticTheme`)
 
 - Keys: `fg`, `muted`, `red`, `primary`, `selectedText` (may be `undefined`), `background`, `panel`.
 - There is NO `border`, `secondary`, `highlight`, or `bg` key.
 - Values are `ThemeColorValue` (`string | RGBA`) — pass through as-is, never string-coerce.
+
+## v2 semantic theme resolution (settled)
+
+- On v2 `host.theme()` wraps `resolveSemanticTheme(context.theme)`, where `context.theme` is a **`ResolvedTheme`**: action states are `focused` / `selected` / `base` (no `$` sigil). The raw theme JSON a plugin authors uses `$focused` / `$selected`; those spellings never appear in the resolved context.
+- The selection background (`primary`) resolves **`focused` first**, so the filled chip paints with the focused accent; a transparent `selectedText` falls through to the resting text color. The exact focused→selected→base order, the transparent-value skip, and the RGBA-identity rule are in `wlib`.
 
 ## Selection / highlight convention (settled)
 
 - The active/selected item is a filled "chip": `backgroundColor={primary}` on the row `<box>`, label `<text fg={selectedText}>` (falls back to the default color when `selectedText` is `undefined`).
 - Inactive items: `fg={muted}`, no background.
 - NO `>` cursor marker, NO `bold`. This matches the analyze dialog tab bar.
+- **Explicit exception — Usage Sessions list is TEXT-ONLY (settled):** the `/usage` Sessions view does NOT use a chip. The selected row is a text-only title in `primary` (`<text fg={selected ? primary : fg}>`), the inactive title is `fg`, the stats line is always `muted`, and the row `<box>` carries NO `backgroundColor` and NO horizontal padding (`<box flexDirection="column" gap={0}>`, preserving `data-session-idx` + scroll). This mirrors shipped v1 exactly. The filled chip applies to Analyze tabs and Persona rows only.
 
 ## Dialog sizing (settled)
 
@@ -41,9 +47,12 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 - Opened by the `e` key in `/usage`. It is a small popup, SMALLER than the help overlay.
 - Layout: centered medium-width modal. Outer box = `position="absolute" zIndex={10} left/top/right/bottom=0` + `alignItems="center"` + `justifyContent="center"` + dimmed backdrop `backgroundColor={RGBA.fromInts(0, 0, 0, 150)}`. Inner box = `width={DIALOG_WIDTHS.medium}` (60), NO height/top/bottom/flexGrow (wraps content), `backgroundColor={panel}`, NO border.
 - Format options are FLUSH (wrapped in a gap-less `<box flexDirection="column">`, each option `paddingLeft={1} paddingRight={1}`, no vertical padding) — matching the persona-injector dialog's list spacing.
-- Interaction: `↑`/`↓` navigate, `enter` confirm (copy + close), `esc` closes the overlay ONLY (not the whole dialog), `e` toggles it.
-- Parent dialog owns `selectedIndex`/`showExport` state; while open, a temporary `priority: 2` key layer binds `enter` (never add `enter` to the help `usageBindings`).
+- **Flow is three steps: format → destination → result.** `enter` on a format advances to the destination list (`Export to`: Clipboard / File); `esc` goes back one step. Clipboard → `writeClipboard()` + close; File → `writeFile()` then the **result popup** (`ExportResultOverlay`).
+- **Result step (settled):** on success the popup shows the saved path and two chips — `← →` move focus between `Close` (left) and `Open` (right), `enter` activates the focused chip (`Open` runs `openFolder`, `Close` dismisses), and `o` opens the folder immediately (`openFolder`) as a shortcut. On a **file-write error** the popup shows the error, `Open` is unreachable (only `Close` remains), `enter`/`esc` close it, and the other registered dialog/export keys are consumed so `Open` cannot fire (the result step is modal). The keymap only invokes handlers for registered bindings, so truly unbound keys are never dispatched.
+- `esc` closes the overlay ONLY (not the whole dialog), except inside the result step where it closes the whole export flow; `e` toggles.
+- **State is owned by the wlib `createExportController`, not the parent dialog.** The controller owns `step`/`showExport`/`showResult` plus the temporary `priority: 2` key layer (never add `enter` to the help `usageBindings`). Because the dialog's render callback may re-run, allocate the controller **once per dialog** in a `createOwnedInstance` wrapper constructed outside the callback; call the lazy `.get()` as the first operation inside the callback (so its standalone Solid root inherits the dialog's `Keymap.Provider`) and `dispose()` it in the dialog `onClose` (see `plugin-development` / `wlib`).
 - Copy via `writeClipboard()` + a `copied!` flash (2s); the flash replaces the `e export` footer hint.
+- The format→destination→result flow is **PTY-verified in the sandbox** (real terminal, clipboard + file writes) after the stable-owner fix.
 
 ## Popup backdrop convention
 
@@ -54,6 +63,8 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 
 - `← → {gran}  ·  ↑↓ scroll  ·  e export  ·  h help` — `e export` BEFORE `h help`, and help is always LAST.
 - During the flash: `← → {gran}  ·  ↑↓ scroll  ·  copied!  ·  h help`.
+- **Usage navigation is arrow-only:** granularity/tab switching is `← →`; scroll/session selection is `↑↓` (no `h`/`l`/`j`/`k` aliases).
+- The **Sessions** view is **text-only, NOT a filled chip** (explicit exception to the chip convention, matching shipped v1): the selected row's title is `fg={primary}` on an inactive `fg` title, the stats line is always `fg={muted}`, and the row `<box>` has no `backgroundColor` and no horizontal padding. `↑↓` move, `enter` opens `/analyze` for that session. The session view is toggled with `s`. (Filled chips remain for Analyze tabs and Persona rows.)
 
 ## Analyze dialog footer / tab nav (settled)
 

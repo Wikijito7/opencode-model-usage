@@ -1,4 +1,11 @@
-import type { Provider } from "@opencode-ai/sdk/v2"
+/**
+ * Structural view of a provider with per-model pricing. Kept local (rather than
+ * the v1 SDK `Provider` type) so this pure helper stays host/version
+ * independent; real v1/v2 provider objects are assignable to it.
+ */
+export interface ProviderLike {
+  models?: Record<string, { cost?: { input?: number; output?: number; cache?: { read?: number } } }>
+}
 
 export function splitCost(
   deltaInput: number,
@@ -6,7 +13,7 @@ export function splitCost(
   deltaOutput: number,
   deltaCost: number,
   modelId: string,
-  provider: readonly Provider[]
+  provider: readonly ProviderLike[]
 ): { inputCost: number; outputCost: number } {
   let inputPrice = 0
   let outputPrice = 0
@@ -22,8 +29,11 @@ export function splitCost(
     }
   }
 
-  // If no pricing found, fall back to raw token proportional split
-  if (inputPrice === 0 && outputPrice === 0) {
+  // Only fall back to a raw token-proportional split when NO pricing is known
+  // for this model. A zero input/output price with a non-zero cache-read price
+  // is still pricing: treating it as "unpriced" would silently discard the
+  // cache-read share.
+  if (inputPrice === 0 && outputPrice === 0 && cacheReadPrice === 0) {
     const totalTok = deltaInput + deltaCacheRead + deltaOutput
     if (totalTok === 0) return { inputCost: 0, outputCost: 0 }
     return {
@@ -45,7 +55,7 @@ export function splitCost(
   }
 }
 
-export function getCacheReadPrice(modelId: string, provider: readonly Provider[]): number {
+export function getCacheReadPrice(modelId: string, provider: readonly ProviderLike[]): number {
   for (const p of provider) {
     const model = p.models?.[modelId]
     if (model?.cost) {

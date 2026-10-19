@@ -4,12 +4,16 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
+  detectUsageSchema,
   fetchRawRows,
   fetchRootSessionTimestamps,
+  getEarliestUsageDate,
   queryDailyTotals,
   queryTopSessions,
+  queryUsage,
   type RawUsageRow,
   type TopSession,
+  type UsageSchemaInfo,
 } from "@model-usage/db"
 
 function setupDb(): { dbPath: string; cleanup: () => void } {
@@ -218,9 +222,35 @@ describe("fetchRawRows", () => {
     })
 
     const rows = fetchRawRows(setup.dbPath, REFERENCE - 1, REFERENCE + 86_400_000)
-    expect(Array.isArray(rows)).toBe(true)
-    const nullRows = rows.filter((r: RawUsageRow) => r.model_id === null || r.provider_id === null)
-    expect(rows.length).toBeGreaterThanOrEqual(0)
+    expect(rows).not.toHaveProperty("error")
+    if (!Array.isArray(rows)) throw new Error("expected rows array")
+
+    // An assistant row is selected by `role`, not by model/provider, so a
+    // missing modelID/providerID must still yield the row — with the usage
+    // fields parsed and the absent identifiers normalised to null.
+    expect(rows).toHaveLength(1)
+    expect(rows[0].model_id).toBeNull()
+    expect(rows[0].provider_id).toBeNull()
+    expect(rows[0].cost).toBeCloseTo(0.05, 6)
+    expect(rows[0].input_tokens).toBe(100)
+    expect(rows[0].output_tokens).toBe(50)
+  })
+
+  it("handles a missing (undefined) model/provider field gracefully", () => {
+    insertMessage(setup.dbPath, REFERENCE, {
+      role: "assistant", cost: 0.07, tokens: { input: 7, output: 3 },
+    })
+
+    const rows = fetchRawRows(setup.dbPath, REFERENCE - 1, REFERENCE + 86_400_000)
+    expect(rows).not.toHaveProperty("error")
+    if (!Array.isArray(rows)) throw new Error("expected rows array")
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0].model_id).toBeNull()
+    expect(rows[0].provider_id).toBeNull()
+    expect(rows[0].cost).toBeCloseTo(0.07, 6)
+    expect(rows[0].input_tokens).toBe(7)
+    expect(rows[0].output_tokens).toBe(3)
   })
 
   it("DB file doesn't exist → returns error object", () => {
@@ -559,3 +589,871 @@ describe("queryTopSessions", () => {
 function dayStart(ms: number): number {
   return Math.floor(ms / 86_400_000) * 86_400_000
 }
+
+// ─── Schema-aware layer: fixtures ────────────────────────────────────────────
+//
+// OpenCode 2.0.27 renamed the historical tables: `message` → `session_message`
+// (with a `type` discriminator) and `session` → `session_v2`; assistant usage
+// lives under `data.model.id` / `data.model.providerID` instead of
+// `data.modelID` / `data.providerID`. The fixtures below build each generation
+// and the hybrid a v1→v2 migration leaves behind.
+
+type TestDb = { dbPath: string; cleanup: () => void }
+
+const V2_DAY = 86_400_000
+const V2_REFERENCE = Date.UTC(2026, 6, 6, 12, 0, 0)
+
+const SESSION_TABLE_SQL = `(
+  id TEXT,
+  parent_id TEXT,
+  time_created INTEGER,
+  title TEXT,
+  cost REAL,
+  tokens_input INTEGER,
+  tokens_output INTEGER,
+  tokens_reasoning INTEGER,
+  tokens_cache_read INTEGER,
+  tokens_cache_write INTEGER,
+  project_id TEXT,
+  time_compacting INTEGER
+)`
+
+function tempDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix))
+}
+
+/** Pure v2 DB: `session_message` + `session_v2` only (OpenCode 2.0.27). */
+function setupV2Db(): TestDb {
+  const dir = tempDir("opencode-test-v2-")
+  const dbPath = join(dir, "test.db")
+  const db = new Database(dbPath)
+  try {
+    db.run(`CREATE TABLE session_message (type TEXT, time_created INTEGER, data TEXT)`)
+    db.run(`CREATE TABLE session_v2 ${SESSION_TABLE_SQL}`)
+  } finally {
+    db.close()
+  }
+  return { dbPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** Hybrid DB: both v1 (`message`/`session`) and v2 (`session_message`/`session_v2`). */
+function setupHybridDb(): TestDb {
+  const dir = tempDir("opencode-test-hybrid-")
+  const dbPath = join(dir, "test.db")
+  const db = new Database(dbPath)
+  try {
+    db.run(`CREATE TABLE message (time_created INTEGER, data TEXT)`)
+    db.run(`CREATE TABLE session ${SESSION_TABLE_SQL}`)
+    db.run(`CREATE TABLE session_message (type TEXT, time_created INTEGER, data TEXT)`)
+    db.run(`CREATE TABLE session_v2 ${SESSION_TABLE_SQL}`)
+  } finally {
+    db.close()
+  }
+  return { dbPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** Create a DB from arbitrary DDL — used for unsupported/malformed schemas. */
+function setupCustomDb(statements: string[]): TestDb {
+  const dir = tempDir("opencode-test-custom-")
+  const dbPath = join(dir, "test.db")
+  const db = new Database(dbPath)
+  try {
+    for (const statement of statements) db.run(statement)
+  } finally {
+    db.close()
+  }
+  return { dbPath, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+}
+
+/** Usage payload shaped like an OpenCode 2.0.27 assistant message. */
+function v2Data(
+  modelID: string | null,
+  providerID: string | null,
+  cost: number,
+  input: number,
+  output: number,
+): Record<string, unknown> {
+  return { model: { id: modelID, providerID }, cost, tokens: { input, output } }
+}
+
+function insertV2Message(
+  dbPath: string,
+  timeCreated: number,
+  type: string,
+  data: Record<string, unknown>,
+) {
+  const db = new Database(dbPath)
+  try {
+    db.run(`INSERT INTO session_message (type, time_created, data) VALUES (?, ?, ?)`, [
+      type,
+      timeCreated,
+      JSON.stringify(data),
+    ])
+  } finally {
+    db.close()
+  }
+}
+
+function insertV2Session(
+  dbPath: string,
+  id: string,
+  parentId: string | null,
+  timeCreated: number,
+  overrides: Partial<{
+    title: string
+    cost: number
+    tokensInput: number
+    tokensOutput: number
+  }> = {},
+) {
+  const db = new Database(dbPath)
+  try {
+    db.run(
+      `INSERT INTO session_v2 (
+        id, parent_id, time_created, title, cost,
+        tokens_input, tokens_output, tokens_reasoning,
+        tokens_cache_read, tokens_cache_write,
+        project_id, time_compacting
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        parentId,
+        timeCreated,
+        overrides.title ?? "",
+        overrides.cost ?? 0,
+        overrides.tokensInput ?? 0,
+        overrides.tokensOutput ?? 0,
+        0,
+        0,
+        0,
+        "",
+        0,
+      ],
+    )
+  } finally {
+    db.close()
+  }
+}
+
+/** Snapshot table names + row counts, for read-only (no-write) assertions. */
+function snapshotDb(dbPath: string): { tables: string[]; counts: Record<string, number> } {
+  const db = new Database(dbPath, { readonly: true })
+  try {
+    const tables = (
+      db.query(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).all() as { name: string }[]
+    ).map((r) => r.name)
+    const counts: Record<string, number> = {}
+    for (const table of tables) {
+      counts[table] = (db.query(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c
+    }
+    return { tables, counts }
+  } finally {
+    db.close()
+  }
+}
+
+// ─── detectUsageSchema ───────────────────────────────────────────────────────
+
+describe("detectUsageSchema", () => {
+  let setup: TestDb
+
+  afterEach(() => {
+    setup?.cleanup()
+  })
+
+  it("classifies a pure v1 database", () => {
+    setup = setupDb()
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info: UsageSchemaInfo = detectUsageSchema(db)
+      expect(info.kind).toBe("v1")
+      expect(info.v1Message).toBe(true)
+      expect(info.v1Session).toBe(true)
+      expect(info.v2Message).toBe(false)
+      expect(info.v2Session).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("classifies a pure v2 database (session_message / session_v2)", () => {
+    setup = setupV2Db()
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.kind).toBe("v2")
+      expect(info.v2Message).toBe(true)
+      expect(info.v2Session).toBe(true)
+      expect(info.v1Message).toBe(false)
+      expect(info.v1Session).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("classifies a hybrid database", () => {
+    setup = setupHybridDb()
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.kind).toBe("hybrid")
+      expect(info.v1Message).toBe(true)
+      expect(info.v1Session).toBe(true)
+      expect(info.v2Message).toBe(true)
+      expect(info.v2Session).toBe(true)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("classifies an empty/irrelevant database as unsupported", () => {
+    setup = setupCustomDb([`CREATE TABLE unrelated (id INTEGER)`])
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.kind).toBe("unsupported")
+      expect(info.v1Message).toBe(false)
+      expect(info.v1Session).toBe(false)
+      expect(info.v2Message).toBe(false)
+      expect(info.v2Session).toBe(false)
+    } finally {
+      db.close()
+    }
+  })
+
+  it("requires the v2 `type` discriminator (a table missing it is not v2)", () => {
+    // session_message without `type` is not a usable v2 message table.
+    setup = setupCustomDb([`CREATE TABLE session_message (time_created INTEGER, data TEXT)`])
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.v2Message).toBe(false)
+      expect(info.kind).toBe("unsupported")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("requires a `data` column (a message table missing it is not v1)", () => {
+    setup = setupCustomDb([`CREATE TABLE message (time_created INTEGER)`])
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.v1Message).toBe(false)
+      expect(info.kind).toBe("unsupported")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("requires the full session shape (missing tokens_output is not a session table)", () => {
+    setup = setupCustomDb([
+      `CREATE TABLE session (id TEXT, parent_id TEXT, time_created INTEGER, title TEXT, cost REAL, tokens_input INTEGER)`,
+    ])
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      const info = detectUsageSchema(db)
+      expect(info.v1Session).toBe(false)
+      expect(info.kind).toBe("unsupported")
+    } finally {
+      db.close()
+    }
+  })
+
+  it("is read-only: detecting never creates a table", () => {
+    setup = setupV2Db()
+    const before = snapshotDb(setup.dbPath)
+    const db = new Database(setup.dbPath, { readonly: true })
+    try {
+      detectUsageSchema(db)
+    } finally {
+      db.close()
+    }
+    expect(snapshotDb(setup.dbPath)).toEqual(before)
+  })
+})
+
+// ─── v1 ⇄ v2 output parity ───────────────────────────────────────────────────
+
+describe("v1 ⇄ v2 output parity", () => {
+  let v1: TestDb
+  let v2: TestDb
+
+  const RANGE_START = Date.UTC(2026, 6, 6, 0, 0, 0)
+  const RANGE_END = RANGE_START + 2 * V2_DAY
+  const MSG1 = RANGE_START + 1000
+  const MSG2 = RANGE_START + V2_DAY + 1000
+
+  function seedV1() {
+    insertMessage(v1.dbPath, MSG1, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.05, tokens: { input: 100, output: 50 },
+    })
+    insertMessage(v1.dbPath, RANGE_START + 500, {
+      role: "user", modelID: null, providerID: null,
+      cost: 0, tokens: { input: 0, output: 0 },
+    })
+    insertMessage(v1.dbPath, MSG2, {
+      role: "assistant", modelID: "claude-3", providerID: "anthropic",
+      cost: 0.08, tokens: { input: 2000, output: 1000 },
+    })
+    insertSession(v1.dbPath, "root1", null, RANGE_START, {
+      title: "one", cost: 0.5, tokensInput: 100, tokensOutput: 100,
+    })
+    insertSession(v1.dbPath, "root2", null, RANGE_START + 1000, {
+      title: "two", cost: 0.9, tokensInput: 10, tokensOutput: 10,
+    })
+    insertSession(v1.dbPath, "sub1", "root1", RANGE_START + 10, { cost: 99 })
+  }
+
+  function seedV2() {
+    insertV2Message(v2.dbPath, MSG1, "assistant", v2Data("gpt-4", "copilot", 0.05, 100, 50))
+    insertV2Message(v2.dbPath, RANGE_START + 500, "user", {})
+    insertV2Message(v2.dbPath, MSG2, "assistant", v2Data("claude-3", "anthropic", 0.08, 2000, 1000))
+    insertV2Session(v2.dbPath, "root1", null, RANGE_START, {
+      title: "one", cost: 0.5, tokensInput: 100, tokensOutput: 100,
+    })
+    insertV2Session(v2.dbPath, "root2", null, RANGE_START + 1000, {
+      title: "two", cost: 0.9, tokensInput: 10, tokensOutput: 10,
+    })
+    insertV2Session(v2.dbPath, "sub1", "root1", RANGE_START + 10, { cost: 99 })
+  }
+
+  beforeEach(() => {
+    v1 = setupDb()
+    v2 = setupV2Db()
+    seedV1()
+    seedV2()
+  })
+
+  afterEach(() => {
+    v1.cleanup()
+    v2.cleanup()
+  })
+
+  it("queryUsage produces identical model/token/cost output", () => {
+    expect(queryUsage(v2.dbPath, RANGE_START, RANGE_END)).toEqual(
+      queryUsage(v1.dbPath, RANGE_START, RANGE_END),
+    )
+  })
+
+  it("v2 usage reads data.model.id / data.model.providerID / cost / tokens", () => {
+    const usage = queryUsage(v2.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalInput).toBe(2100)
+    expect(usage.totalOutput).toBe(1050)
+    expect(usage.totalCost).toBeCloseTo(0.13, 6)
+    const gpt = usage.models.find((m) => m.modelID === "gpt-4")
+    expect(gpt).toEqual({
+      providerID: "copilot",
+      modelID: "gpt-4",
+      totalCost: 0.05,
+      totalInput: 100,
+      totalOutput: 50,
+    })
+  })
+
+  it("fetchRawRows produces identical rows (fields + order + time)", () => {
+    expect(fetchRawRows(v2.dbPath, RANGE_START, RANGE_END)).toEqual(
+      fetchRawRows(v1.dbPath, RANGE_START, RANGE_END),
+    )
+  })
+
+  it("v2 raw rows carry time_created and model/provider/token/cost fields", () => {
+    const rows = fetchRawRows(v2.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      time_created: MSG1,
+      model_id: "gpt-4",
+      provider_id: "copilot",
+      input_tokens: 100,
+      output_tokens: 50,
+    })
+    expect(rows[0].cost).toBeCloseTo(0.05, 6)
+  })
+
+  it("queryDailyTotals produces identical per-day buckets", () => {
+    expect(queryDailyTotals(v2.dbPath, RANGE_START, RANGE_END)).toEqual(
+      queryDailyTotals(v1.dbPath, RANGE_START, RANGE_END),
+    )
+  })
+
+  it("getEarliestUsageDate returns the same earliest assistant timestamp", () => {
+    expect(getEarliestUsageDate(v2.dbPath)).toBe(getEarliestUsageDate(v1.dbPath))
+    expect(getEarliestUsageDate(v2.dbPath)).toBe(MSG1)
+  })
+
+  it("queryTopSessions (cost & tokens) produces the same leaderboard", () => {
+    expect(queryTopSessions(v2.dbPath, RANGE_START, RANGE_END, "cost")).toEqual(
+      queryTopSessions(v1.dbPath, RANGE_START, RANGE_END, "cost"),
+    )
+    expect(queryTopSessions(v2.dbPath, RANGE_START, RANGE_END, "tokens")).toEqual(
+      queryTopSessions(v1.dbPath, RANGE_START, RANGE_END, "tokens"),
+    )
+  })
+
+  it("v2 leaderboard counts subagents and excludes them from roots", () => {
+    const result = queryTopSessions(v2.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in result) throw new Error("expected sessions result")
+    expect(result.sessions.map((s) => s.id).sort()).toEqual(["root1", "root2"])
+    expect(result.sessions.find((s) => s.id === "root1")?.subagentCount).toBe(1)
+  })
+
+  it("fetchRootSessionTimestamps produces identical root timestamps", () => {
+    const v2Timestamps = fetchRootSessionTimestamps(v2.dbPath, RANGE_START, RANGE_END)
+    const v1Timestamps = fetchRootSessionTimestamps(v1.dbPath, RANGE_START, RANGE_END)
+    expect(v2Timestamps).toEqual(v1Timestamps)
+    expect(v2Timestamps).toEqual([RANGE_START, RANGE_START + 1000])
+  })
+
+  it("v2 excludes non-assistant `type` rows (user/system)", () => {
+    insertV2Message(v2.dbPath, RANGE_START + 2000, "user", v2Data("x", "y", 999, 9999, 9999))
+    insertV2Message(v2.dbPath, RANGE_START + 3000, "system", v2Data("x", "y", 999, 9999, 9999))
+    const rows = fetchRawRows(v2.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(2)
+    expect(rows.every((r) => r.cost < 999)).toBe(true)
+  })
+
+  it("v1-shaped JSON in a v2 table is ignored (no data.modelID fallback)", () => {
+    insertV2Message(v2.dbPath, RANGE_START + 4000, "assistant", {
+      modelID: "legacy-model", providerID: "legacy-provider",
+      cost: 5, tokens: { input: 9, output: 9 },
+    })
+    const rows = fetchRawRows(v2.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows.some((r) => r.model_id === "legacy-model")).toBe(false)
+  })
+})
+
+// ─── Hybrid source selection ─────────────────────────────────────────────────
+
+describe("hybrid schema source selection", () => {
+  let setup: TestDb
+
+  const RANGE_START = Date.UTC(2026, 6, 6, 0, 0, 0)
+  const RANGE_END = RANGE_START + V2_DAY
+
+  afterEach(() => {
+    setup?.cleanup()
+  })
+
+  function assistantV1(dbPath: string, t: number, cost: number, input: number, output: number) {
+    insertMessage(dbPath, t, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost, tokens: { input, output },
+    })
+  }
+
+  function assistantV2(dbPath: string, t: number, cost: number, input: number, output: number) {
+    insertV2Message(dbPath, t, "assistant", v2Data("gpt-4", "copilot", cost, input, output))
+  }
+
+  it("prefers v2 when it has the newest dataset and does not double count v1", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START, 0.11, 100, 50)
+    assistantV2(setup.dbPath, RANGE_START + 1000, 0.22, 10, 5)
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].cost).toBeCloseTo(0.22, 6)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.22, 6)
+    expect(usage.totalInput).toBe(10)
+  })
+
+  it("prefers v1 when v1 has the newest dataset", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START + 1000, 0.33, 300, 300)
+    assistantV2(setup.dbPath, RANGE_START, 0.44, 4, 4)
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].cost).toBeCloseTo(0.33, 6)
+  })
+
+  it("prefers v2 on a timestamp tie", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START, 0.11, 1, 1)
+    assistantV2(setup.dbPath, RANGE_START, 0.22, 2, 2)
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].cost).toBeCloseTo(0.22, 6)
+  })
+
+  it("falls back to legacy v1 when the v2 table has no rows", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START, 0.55, 55, 55)
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].cost).toBeCloseTo(0.55, 6)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.55, 6)
+    expect(usage.totalInput).toBe(55)
+  })
+
+  it("falls back to legacy v1 when v2 exists but has no rows in the window", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START, 0.66, 66, 66)
+    // v2 is globally newest (makes it primary) but lies outside the query window.
+    assistantV2(setup.dbPath, RANGE_START + 10 * V2_DAY, 0.99, 99, 99)
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].cost).toBeCloseTo(0.66, 6)
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    expect(daily).not.toHaveProperty("error")
+    const totals = daily as { input_tokens: number }[]
+    expect(totals).toHaveLength(1)
+    expect(totals[0].input_tokens).toBe(66)
+  })
+
+  it("daily totals are never summed across datasets (no double count)", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START, 0.11, 100, 100)
+    assistantV2(setup.dbPath, RANGE_START + 1000, 0.22, 10, 10)
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in daily) throw new Error("expected daily totals")
+    expect(daily).toHaveLength(1)
+    expect(daily[0].input_tokens).toBe(10)
+    expect(daily[0].cost).toBeCloseTo(0.22, 6)
+  })
+
+  it("session leaderboard falls back to v1 when session_v2 is empty", () => {
+    setup = setupHybridDb()
+    insertSession(setup.dbPath, "legacy-root", null, RANGE_START, {
+      title: "legacy", cost: 1.5, tokensInput: 10, tokensOutput: 20,
+    })
+
+    const result = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in result) throw new Error("expected sessions result")
+    expect(result.sessions.map((s) => s.id)).toEqual(["legacy-root"])
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START])
+  })
+
+  it("session leaderboard prefers v2 when both session tables have rows", () => {
+    setup = setupHybridDb()
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START, { cost: 0.1 })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 1000, { cost: 0.2 })
+
+    const result = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in result) throw new Error("expected sessions result")
+    expect(result.sessions).toHaveLength(1)
+    expect(result.sessions[0].id).toBe("v2-root")
+    expect(result.sessions[0].cost).toBeCloseTo(0.2, 6)
+  })
+
+  it("getEarliestUsageDate prefers the active dataset", () => {
+    setup = setupHybridDb()
+    assistantV1(setup.dbPath, RANGE_START + 500, 0.1, 1, 1)
+    assistantV2(setup.dbPath, RANGE_START + 2000, 0.2, 2, 2)
+    // v2 is newest → its MIN(time_created) is the v2 row.
+    expect(getEarliestUsageDate(setup.dbPath)).toBe(RANGE_START + 2000)
+  })
+})
+
+// ─── Mixed-family source selection (independent generations) ─────────────────
+//
+// `db.ts` resolves the message family (`message` vs `session_message`) and the
+// session family (`session` vs `session_v2`) *independently*: each picks its own
+// primary by MAX(time_created) and falls back to its own secondary only when the
+// primary has no rows in the window. These tests pin the case where the two
+// families resolve to DIFFERENT generations — a regression guard against a
+// single global generation choice, and against cross-family row merging or
+// double counting.
+
+describe("mixed-family source selection (independent generations)", () => {
+  let setup: TestDb
+
+  const RANGE_START = Date.UTC(2026, 6, 6, 0, 0, 0)
+  const RANGE_END = RANGE_START + V2_DAY
+
+  afterEach(() => {
+    setup?.cleanup()
+  })
+
+  it("v2 message family primary while v1 session family primary: each query family chooses independently", () => {
+    setup = setupHybridDb()
+
+    // Message family — v2 (`session_message`) is the newer dataset.
+    insertMessage(setup.dbPath, RANGE_START + 1000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.11, tokens: { input: 100, output: 50 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 5000, "assistant",
+      v2Data("claude-3", "anthropic", 0.22, 10, 5),
+    )
+
+    // Session family — v1 (`session`) is the newer dataset.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 6000, {
+      title: "v1", cost: 0.5, tokensInput: 100, tokensOutput: 100,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 2000, {
+      title: "v2", cost: 0.9, tokensInput: 10, tokensOutput: 10,
+    })
+
+    // ── Message-family queries read the v2 dataset ────────────────────────
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1) // exactly one row — no double count
+    expect(rows[0].model_id).toBe("claude-3")
+    expect(rows[0].cost).toBeCloseTo(0.22, 6)
+    expect(rows[0].input_tokens).toBe(10)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.22, 6)
+    expect(usage.totalInput).toBe(10)
+    expect(usage.totalOutput).toBe(5)
+    expect(usage.models).toHaveLength(1)
+    expect(usage.models[0].modelID).toBe("claude-3")
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in daily) throw new Error("expected daily totals")
+    expect(daily).toHaveLength(1)
+    expect(daily[0].input_tokens).toBe(10)
+    expect(daily[0].output_tokens).toBe(5)
+    expect(daily[0].cost).toBeCloseTo(0.22, 6)
+
+    // ── Session-family queries read the v1 dataset ───────────────────────
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1) // not merged with v2 session family
+    expect(tops.sessions[0].id).toBe("v1-root")
+    expect(tops.sessions[0].cost).toBeCloseTo(0.5, 6)
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 6000])
+  })
+
+  it("inverse: v1 message family primary while v2 session family primary: each query family chooses independently", () => {
+    setup = setupHybridDb()
+
+    // Message family — v1 (`message`) is the newer dataset.
+    insertMessage(setup.dbPath, RANGE_START + 5000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.33, tokens: { input: 30, output: 40 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 1000, "assistant",
+      v2Data("claude-3", "anthropic", 0.44, 4, 4),
+    )
+
+    // Session family — v2 (`session_v2`) is the newer dataset.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 2000, {
+      title: "v1", cost: 0.1, tokensInput: 10, tokensOutput: 10,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 6000, {
+      title: "v2", cost: 0.7, tokensInput: 700, tokensOutput: 700,
+    })
+
+    // ── Message-family queries read the v1 dataset ────────────────────────
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1) // exactly one row — no double count
+    expect(rows[0].model_id).toBe("gpt-4")
+    expect(rows[0].cost).toBeCloseTo(0.33, 6)
+    expect(rows[0].input_tokens).toBe(30)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalCost).toBeCloseTo(0.33, 6)
+    expect(usage.totalInput).toBe(30)
+    expect(usage.totalOutput).toBe(40)
+    expect(usage.models).toHaveLength(1)
+    expect(usage.models[0].modelID).toBe("gpt-4")
+
+    const daily = queryDailyTotals(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in daily) throw new Error("expected daily totals")
+    expect(daily).toHaveLength(1)
+    expect(daily[0].input_tokens).toBe(30)
+    expect(daily[0].output_tokens).toBe(40)
+    expect(daily[0].cost).toBeCloseTo(0.33, 6)
+
+    // ── Session-family queries read the v2 dataset ───────────────────────
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "tokens")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1) // not merged with v1 session family
+    expect(tops.sessions[0].id).toBe("v2-root")
+    expect(tops.sessions[0].cost).toBeCloseTo(0.7, 6)
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 6000])
+  })
+
+  it("each family falls back to its own secondary when its primary has no rows in the window", () => {
+    setup = setupHybridDb()
+
+    // Message family: v2 is globally newest (primary) but empty in the window,
+    // so the message queries must fall back to v1 — independently of sessions.
+    insertMessage(setup.dbPath, RANGE_START + 1000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.11, tokens: { input: 100, output: 50 },
+    })
+    insertV2Message(
+      setup.dbPath, RANGE_START + 10 * V2_DAY, "assistant",
+      v2Data("claude-3", "anthropic", 0.22, 10, 5),
+    )
+
+    // Session family: v1 is globally newest (primary) but empty in the window,
+    // so the session queries must fall back to v2.
+    insertSession(setup.dbPath, "v1-root", null, RANGE_START + 10 * V2_DAY, {
+      title: "v1", cost: 0.5,
+    })
+    insertV2Session(setup.dbPath, "v2-root", null, RANGE_START + 2000, {
+      title: "v2", cost: 0.9,
+    })
+
+    const rows = fetchRawRows(setup.dbPath, RANGE_START, RANGE_END) as RawUsageRow[]
+    expect(rows).toHaveLength(1)
+    expect(rows[0].model_id).toBe("gpt-4")
+    expect(rows[0].input_tokens).toBe(100)
+
+    const usage = queryUsage(setup.dbPath, RANGE_START, RANGE_END)
+    if ("error" in usage) throw new Error("expected usage result")
+    expect(usage.totalInput).toBe(100)
+
+    const tops = queryTopSessions(setup.dbPath, RANGE_START, RANGE_END, "cost")
+    if ("error" in tops) throw new Error("expected sessions result")
+    expect(tops.sessions).toHaveLength(1)
+    expect(tops.sessions[0].id).toBe("v2-root")
+
+    const timestamps = fetchRootSessionTimestamps(setup.dbPath, RANGE_START, RANGE_END)
+    expect(timestamps).toEqual([RANGE_START + 2000])
+  })
+})
+
+// ─── Unsupported / malformed schema ──────────────────────────────────────────
+
+describe("unsupported and malformed schemas", () => {
+  let setup: TestDb
+
+  const START = 0
+  const END = Date.UTC(2026, 6, 7)
+
+  afterEach(() => {
+    setup?.cleanup()
+  })
+
+  it("empty/irrelevant DB returns graceful empties from every query", () => {
+    setup = setupCustomDb([`CREATE TABLE unrelated (id INTEGER)`])
+
+    const usage = queryUsage(setup.dbPath, START, END)
+    expect(usage).toEqual({ models: [], totalInput: 0, totalOutput: 0, totalCost: 0 })
+
+    expect(fetchRawRows(setup.dbPath, START, END)).toEqual([])
+    expect(queryDailyTotals(setup.dbPath, START, END)).toEqual([])
+    expect(getEarliestUsageDate(setup.dbPath)).toBeNull()
+
+    const sessions = queryTopSessions(setup.dbPath, START, END, "cost")
+    expect(sessions).toEqual({ sessions: [] })
+    expect(fetchRootSessionTimestamps(setup.dbPath, START, END)).toEqual([])
+  })
+
+  it("malformed v2 (session_message without `type`) degrades instead of erroring", () => {
+    setup = setupCustomDb([
+      `CREATE TABLE session_message (time_created INTEGER, data TEXT)`,
+      `INSERT INTO session_message (time_created, data) VALUES (1000, '{"model":{"id":"x","providerID":"y"}}')`,
+    ])
+
+    const usage = queryUsage(setup.dbPath, START, END)
+    expect(usage).toEqual({ models: [], totalInput: 0, totalOutput: 0, totalCost: 0 })
+    expect(fetchRawRows(setup.dbPath, START, END)).toEqual([])
+    expect(getEarliestUsageDate(setup.dbPath)).toBeNull()
+    expect(queryTopSessions(setup.dbPath, START, END, "cost")).toEqual({ sessions: [] })
+  })
+
+  it("malformed v1 (message without `data`) degrades instead of erroring", () => {
+    setup = setupCustomDb([`CREATE TABLE message (time_created INTEGER)`])
+
+    expect(fetchRawRows(setup.dbPath, START, END)).toEqual([])
+    expect(queryDailyTotals(setup.dbPath, START, END)).toEqual([])
+    expect(getEarliestUsageDate(setup.dbPath)).toBeNull()
+  })
+
+  it("a malformed table is ignored while a well-formed sibling still works", () => {
+    setup = setupCustomDb([
+      `CREATE TABLE session_message (time_created INTEGER, data TEXT)`,
+      `CREATE TABLE session_v2 (id TEXT, parent_id TEXT, time_created INTEGER, title TEXT, cost REAL, tokens_input INTEGER, tokens_output INTEGER)`,
+      `INSERT INTO session_v2 (id, parent_id, time_created, title, cost, tokens_input, tokens_output) VALUES ('r', NULL, 1000, 't', 0.5, 10, 20)`,
+    ])
+
+    // v2Session is well-formed → the leaderboard works; v2Message is ignored.
+    const result = queryTopSessions(setup.dbPath, START, END, "cost")
+    if ("error" in result) throw new Error("expected sessions result")
+    expect(result.sessions.map((s) => s.id)).toEqual(["r"])
+    expect(fetchRawRows(setup.dbPath, START, END)).toEqual([])
+  })
+
+  it("non-assistant-only v2 data returns an empty usage result", () => {
+    setup = setupV2Db()
+    insertV2Message(setup.dbPath, 1000, "user", v2Data("m", "p", 1, 10, 10))
+    insertV2Message(setup.dbPath, 2000, "system", v2Data("m", "p", 1, 10, 10))
+
+    expect(queryUsage(setup.dbPath, START, END)).toEqual({
+      models: [], totalInput: 0, totalOutput: 0, totalCost: 0,
+    })
+    expect(fetchRawRows(setup.dbPath, START, END)).toEqual([])
+  })
+})
+
+// ─── Read-only guarantees ────────────────────────────────────────────────────
+
+describe("read-only guarantees", () => {
+  let setup: TestDb
+
+  const START = 0
+  const END = Date.UTC(2026, 6, 7)
+
+  beforeEach(() => {
+    setup = setupDb()
+    insertMessage(setup.dbPath, 1000, {
+      role: "assistant", modelID: "gpt-4", providerID: "copilot",
+      cost: 0.05, tokens: { input: 100, output: 50 },
+    })
+    insertSession(setup.dbPath, "root", null, 500, { cost: 0.5, tokensInput: 10, tokensOutput: 10 })
+  })
+
+  afterEach(() => {
+    setup.cleanup()
+  })
+
+  it("path-based queries never write (schema and row counts unchanged)", () => {
+    const before = snapshotDb(setup.dbPath)
+    fetchRawRows(setup.dbPath, START, END)
+    queryUsage(setup.dbPath, START, END)
+    queryDailyTotals(setup.dbPath, START, END)
+    queryTopSessions(setup.dbPath, START, END, "cost")
+    fetchRootSessionTimestamps(setup.dbPath, START, END)
+    getEarliestUsageDate(setup.dbPath)
+    expect(snapshotDb(setup.dbPath)).toEqual(before)
+  })
+
+  it("accepts an already-open handle and leaves it open and unmodified", () => {
+    const db = new Database(setup.dbPath)
+    try {
+      const usage = queryUsage(db, START, END)
+      if ("error" in usage) throw new Error("expected usage result")
+      expect(usage.totalInput).toBe(100)
+
+      // The caller-owned handle must survive the call (ownConnection === false).
+      expect(db.query(`SELECT COUNT(*) AS c FROM message`).get()).toEqual({ c: 1 })
+      expect(db.query(`SELECT 1 AS x`).get()).toEqual({ x: 1 })
+    } finally {
+      db.close()
+    }
+  })
+
+  it("is idempotent: repeated reads return the same result", () => {
+    const first = fetchRawRows(setup.dbPath, START, END)
+    const second = fetchRawRows(setup.dbPath, START, END)
+    expect(second).toEqual(first)
+  })
+})

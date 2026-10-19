@@ -1,3 +1,27 @@
+/**
+ * model-usage — combined OpenCode v1/v2 server entrypoint (flat root file).
+ *
+ * This flat root `.ts` file is admitted by BOTH generations' auto-discovery
+ * (v1 convention discovery; v2 core discovery admits bare `.ts` children). Its
+ * single default export carries the official dual-generation shape:
+ *
+ *   default = { id: "model-usage", server: <v1 server>, setup: <v2 setup> }
+ *
+ * - OpenCode **v1 (1.19)** reads the `server` property (`@opencode-ai/plugin`
+ *   `PluginModule`/`Plugin`: `(input, options?) => Promise<Hooks>`).
+ * - OpenCode **v2 (2.0.27)** reads `id` + `setup` (`@opencode/plugin` promise
+ *   `Plugin`), and ignores the extra `server` key per the host schema.
+ *
+ * Each generation ignores the other's field, so one file serves both. The v2
+ * setup is imported from the non-entrypoint helper `./model-usage/server-setup`
+ * (plain `setup` function, no default export — so the plugin directory does not
+ * load a second server). That helper uses only a **type-only**
+ * `@opencode/plugin` import, so loading this file never evaluates a runtime
+ * `@opencode/plugin` import that v1 cannot resolve.
+ *
+ * The v1 and v2 host APIs are never mixed: `ModelUsageServerPlugin` (below) is
+ * the v1 implementation; `v2Setup` is the v2 implementation.
+ */
 import { homedir } from "node:os"
 import { mkdirSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import type { Model } from "@opencode-ai/sdk/v2"
@@ -5,6 +29,7 @@ import { estimateTokens } from "./model-usage/helpers/tokens"
 import { log } from "./model-usage/helpers/debug"
 import { splitSystemFragments } from "./model-usage/helpers/fragments"
 import type { SystemSnapshot, ToolDefSnapshot } from "./model-usage/types"
+import { PLUGIN_ID, setup as v2Setup } from "./model-usage/server-setup"
 
 const TOKENS_DIR = `${homedir()}/.config/opencode/plugins/model-usage`
 const TOKENS_FILE = `${TOKENS_DIR}/system-tokens.json`
@@ -247,3 +272,21 @@ export const ModelUsageServerPlugin = async () => {
     },
   }
 }
+
+/**
+ * Combined OpenCode dual-generation default export.
+ *
+ * - v1 reads `server` and ignores `setup`.
+ * - v2 reads `id` + `setup` and ignores `server`.
+ *
+ * Keep the property set exactly `{ id, server, setup }`: v1's `PluginModule`
+ * declares `tui?: never`, and v2's module schema requires `id` plus a `setup`
+ * (or `effect`) function.
+ */
+const plugin = {
+  id: PLUGIN_ID,
+  server: ModelUsageServerPlugin,
+  setup: v2Setup,
+}
+
+export default plugin

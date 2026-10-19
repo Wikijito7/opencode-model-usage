@@ -1,5 +1,7 @@
 import { describe, it, expect } from "bun:test"
 import { analyzeSessionMessages } from "../../model-usage/analyze-domain"
+import type { AnalyzeMessage, AnalyzePart, AnalyzeToolState } from "../../model-usage/analyze-domain"
+import { PREVIEW_MAX_LEN } from "../../model-usage/helpers/format"
 import type { SystemSnapshot } from "../../model-usage/types"
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -497,6 +499,249 @@ describe("analyzeSessionMessages", () => {
     // No USER category (empty text from empty parts)
     const userCat = result.categories.find((c) => c.name === "USER")
     expect(userCat).toBeUndefined()
+  })
+
+  // ─── Structured (v2) file attachment text in USER context ────────────────
+
+  /** Build a user message from raw parts (file attachments included). */
+  function makeUserPartsMessage(parts: AnalyzePart[]): {
+    info: { role: "user" };
+    parts: AnalyzePart[];
+  } {
+    return { info: { role: "user" }, parts }
+  }
+
+  it("counts an adapter-derived file text label in USER context", () => {
+    const derived = "file:///tmp/report.pdf"
+    const userMsg = makeUserPartsMessage([
+      { type: "text", text: "see attached " },
+      { type: "file", source: { type: "uri", uri: derived }, text: derived },
+    ])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-derived-text",
+      null,
+      null,
+    )
+
+    const userCat = result.categories.find((c) => c.name === "USER")
+    expect(userCat).toBeDefined()
+    expect(userCat!.totalTokens).toBe(estimateTokens("see attached " + derived))
+  })
+
+  it("counts a structured file source uri when no string label is present", () => {
+    const uri = "file:///a/b.txt"
+    const userMsg = makeUserPartsMessage([{ type: "file", source: { type: "uri", uri } }])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-uri",
+      null,
+      null,
+    )
+
+    const userCat = result.categories.find((c) => c.name === "USER")
+    expect(userCat).toBeDefined()
+    expect(userCat!.totalTokens).toBe(estimateTokens(uri))
+  })
+
+  it("still counts a legacy string file source", () => {
+    const src = "src/legacy.ts"
+    const userMsg = makeUserPartsMessage([{ type: "file", source: src }])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-legacy",
+      null,
+      null,
+    )
+
+    const userCat = result.categories.find((c) => c.name === "USER")
+    expect(userCat).toBeDefined()
+    expect(userCat!.totalTokens).toBe(estimateTokens(src))
+  })
+
+  it("ignores a structured inline file source with no displayable text", () => {
+    const userMsg = makeUserPartsMessage([
+      { type: "file", source: { type: "inline" }, data: "YWJj", mime: "text/plain" },
+    ])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-inline",
+      null,
+      null,
+    )
+
+    expect(result.categories.find((c) => c.name === "USER")).toBeUndefined()
+  })
+
+  it("safely handles a file part with data/mime/description/mention but no displayable text", () => {
+    // Mirrors the adapter output for a real attachment whose mention carries no
+    // text: data/mime/description/mention are preserved, but no `text` label is
+    // derived. None of these fields is a displayable string carrier the domain
+    // reads, so the part must contribute nothing rather than throw.
+    const userMsg = makeUserPartsMessage([
+      {
+        type: "file",
+        data: "aGVsbG8=",
+        mime: "text/plain",
+        description: "Meeting notes",
+        mention: { start: 2, end: 5 },
+      },
+    ])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-metadata-only",
+      null,
+      null,
+    )
+
+    expect(result.categories.find((c) => c.name === "USER")).toBeUndefined()
+    expect(result.messageCount).toBe(2)
+  })
+
+  it("does not throw and contributes no text when a file part's source is null", () => {
+    // `null` is deliberately out-of-contract: the domain must tolerate a host
+    // that emits it. The cast keeps the runtime value while the rest of the
+    // fixture stays structurally typed as AnalyzePart.
+    const userMsg = makeUserPartsMessage([
+      { type: "file", source: null as unknown as AnalyzePart["source"] },
+    ])
+    const assistantMsg = makeAssistantMessage({ input: 50 }, "ok")
+
+    const result = analyzeSessionMessages(
+      [userMsg, assistantMsg],
+      "test-file-null-source",
+      null,
+      null,
+    )
+
+    expect(result.categories.find((c) => c.name === "USER")).toBeUndefined()
+    expect(result.messageCount).toBe(2)
+  })
+
+  // ─── Tool state input: structural narrowing (object vs array/primitive) ────
+
+  /**
+   * Build an assistant message from typed tool parts. Tool accounting runs for
+   * any message, but a text-less *user* message `continue`s before the tool
+   * loop, so the parts must ride on an assistant message.
+   */
+  function makeToolAssistantMessage(parts: AnalyzePart[]): AnalyzeMessage {
+    return {
+      info: {
+        role: "assistant",
+        providerID: "test-provider",
+        modelID: "test-model",
+        tokens: { input: 0 },
+      },
+      parts,
+    }
+  }
+
+  function completedTool(
+    tool: string,
+    output: string,
+    input?: unknown,
+    title?: string,
+  ): AnalyzePart {
+    const state: AnalyzeToolState = { status: "completed", output }
+    if (input !== undefined) state.input = input
+    if (title !== undefined) state.title = title
+    return { type: "tool", tool, state }
+  }
+
+  // Large enough that its output candidate dominates the TOOLS median and
+  // therefore surfaces as a hotspot (whose `preview` we can assert on).
+  const BIG_TOOL_OUTPUT = "A".repeat(800)
+  const BIG_TOOL_PREVIEW = "A".repeat(PREVIEW_MAX_LEN - 1) + "…"
+
+  it("derives the tool preview from a plain-object state input (filePath)", () => {
+    const result = analyzeSessionMessages(
+      [
+        makeToolAssistantMessage([
+          completedTool("read", BIG_TOOL_OUTPUT, { filePath: "/a/b/c/d.ts" }),
+          completedTool("grep", "x"),
+          completedTool("glob", "y"),
+        ]),
+      ],
+      "test-tool-input-object",
+      null,
+      null,
+    )
+
+    const hotspot = result.hotspotResults.find((h) => h.label === "Tool: read")
+    expect(hotspot).toBeDefined()
+    expect(hotspot!.preview).toBe("…/c/d.ts")
+  })
+
+  for (const [kind, input] of [
+    ["array", ["a", "b"]],
+    ["string", "hello"],
+    ["number", 42],
+  ] as const) {
+    it(`safely ignores a ${kind} state input (falls back to the output preview)`, () => {
+      const result = analyzeSessionMessages(
+        [
+          makeToolAssistantMessage([
+            completedTool("read", BIG_TOOL_OUTPUT, input),
+            completedTool("grep", "x"),
+            completedTool("glob", "y"),
+          ]),
+        ],
+        `test-tool-input-${kind}`,
+        null,
+        null,
+      )
+
+      const hotspot = result.hotspotResults.find((h) => h.label === "Tool: read")
+      expect(hotspot).toBeDefined()
+      // No input-derived title; the raw output is shown instead.
+      expect(hotspot!.preview).toBe(BIG_TOOL_PREVIEW)
+      expect(hotspot!.preview).not.toContain("…/")
+    })
+  }
+
+  // ─── Compile-time structural assignability ─────────────────────────────────
+  // The runtime claim here is only "it runs"; the real value is that
+  // `tsc --noEmit` fails if the domain's consumed structural types
+  // (AnalyzePart / AnalyzeMessage) drift from the shapes the v2 adapter emits
+  // for these attachment/tool cases.
+  it("accepts a typed structural message fixture (compile-time assignability)", () => {
+    const attachment: AnalyzePart = {
+      type: "file",
+      source: { type: "uri", uri: "file:///tmp/report.pdf" },
+      data: "JVBERi0=",
+      mime: "application/pdf",
+      filename: "report.pdf",
+      description: "Quarterly report",
+      mention: { text: "@report.pdf", start: 0, end: 12 },
+    }
+    const tool: AnalyzePart = {
+      type: "tool",
+      tool: "read",
+      state: {
+        status: "completed",
+        output: "file contents",
+        input: { filePath: "/tmp/a.ts" },
+        title: "Read a.ts",
+      },
+    }
+    const message: AnalyzeMessage = {
+      info: { role: "user" },
+      parts: [attachment, tool],
+    }
+
+    const result = analyzeSessionMessages([message], "typed-fixture", null, null)
+    expect(result.messageCount).toBe(1)
   })
 
   it("includes sysCat.source info in rawSystemText", () => {
