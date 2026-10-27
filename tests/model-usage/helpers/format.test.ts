@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test"
-import { fmtCompact, fmtCostPerMillion, getUsageColor } from "@model-usage/helpers/format"
+import {
+  fmtCompact,
+  fmtCostPerMillion,
+  getProjectionColor,
+  getUsageColor,
+} from "@model-usage/helpers/format"
 
 // ─── fmtCompact ──────────────────────────────────────────────────────────────
 
@@ -72,6 +77,53 @@ describe("getUsageColor", () => {
     expect(getUsageColor(90)).toBe("#eab308")
     expect(getUsageColor(90.1)).toBe("#ef4444")
     expect(getUsageColor(100)).toBe("#ef4444")
+    expect(getUsageColor(101)).toBe("#ef4444")
     expect(getUsageColor(150)).toBe("#ef4444")
+  })
+
+  it("uses provided semantic tokens and preserves RGBA objects", () => {
+    const success = { r: 0.1, g: 0.8, b: 0.2, a: 1 }
+    const red = { r: 0.9, g: 0.1, b: 0.1 }
+    const colors = { success, warning: "SENTINEL_WARNING", red }
+
+    expect(getUsageColor(10, colors)).toBe(success)
+    expect(getUsageColor(80, colors)).toBe("SENTINEL_WARNING")
+    expect(getUsageColor(95, colors)).toBe(red)
+  })
+
+  it("falls back to stable green/yellow when optional tokens are missing", () => {
+    expect(getUsageColor(10, { red: "SENTINEL_RED" })).toBe("#22c55e")
+    expect(getUsageColor(80, { red: "SENTINEL_RED" })).toBe("#eab308")
+    expect(getUsageColor(95, { red: "SENTINEL_RED" })).toBe(
+      "SENTINEL_RED",
+    )
+    expect(
+      getUsageColor(80, { success: "SENTINEL_SUCCESS" }),
+    ).toBe("#eab308")
+    expect(
+      getUsageColor(95, {
+        success: "SENTINEL_SUCCESS",
+        warning: "SENTINEL_WARNING",
+      }),
+    ).toBe("#ef4444")
+  })
+})
+
+describe("getProjectionColor", () => {
+  it("uses success at/below 100 and red above 100 with legacy fallbacks", () => {
+    expect(getProjectionColor(0)).toBe("#22c55e")
+    expect(getProjectionColor(100)).toBe("#22c55e")
+    expect(getProjectionColor(100.1)).toBe("#ef4444")
+    expect(getProjectionColor(150)).toBe("#ef4444")
+  })
+
+  it("uses provided semantic tokens and falls back for missing tokens", () => {
+    const success = { r: 0.1, g: 0.8, b: 0.2 }
+    const red = { r: 0.9, g: 0.1, b: 0.1, a: 1 }
+
+    expect(getProjectionColor(99, { success, red })).toBe(success)
+    expect(getProjectionColor(101, { success, red })).toBe(red)
+    expect(getProjectionColor(99, { red })).toBe("#22c55e")
+    expect(getProjectionColor(101, { success })).toBe("#ef4444")
   })
 })

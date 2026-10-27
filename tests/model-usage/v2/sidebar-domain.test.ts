@@ -11,6 +11,10 @@ import {
   type SidebarTotals,
   type UsageStatusColors,
 } from "@model-usage/v2/sidebar-domain"
+import {
+  getProjectionColor,
+  getUsageColor,
+} from "@model-usage/helpers/format"
 import type { LegacyMessage } from "@model-usage/v2/message-adapter"
 
 // ─── toPricing ───────────────────────────────────────────────────────────────
@@ -421,5 +425,27 @@ describe("getProjectionThemeColor", () => {
 
     expect(getProjectionThemeColor(99.9, rgbaColors)).toBe(success)
     expect(getProjectionThemeColor(101, rgbaColors)).toBe(red)
+  })
+})
+
+
+describe("v2 quota color aliases", () => {
+  it("re-export the v1 helpers as the same functions", () => {
+    expect(getUsageThemeColor).toBe(getUsageColor)
+    expect(getProjectionThemeColor).toBe(getProjectionColor)
+  })
+
+  it("preserve the shared boundary behavior through the v2 aliases", () => {
+    const colors = {
+      success: "S",
+      warning: "W",
+      red: "R",
+    }
+    expect(getUsageThemeColor(75, colors)).toBe("S")
+    expect(getUsageThemeColor(75.1, colors)).toBe("W")
+    expect(getUsageThemeColor(90, colors)).toBe("W")
+    expect(getUsageThemeColor(90.1, colors)).toBe("R")
+    expect(getProjectionThemeColor(100, colors)).toBe("S")
+    expect(getProjectionThemeColor(100.1, colors)).toBe("R")
   })
 })

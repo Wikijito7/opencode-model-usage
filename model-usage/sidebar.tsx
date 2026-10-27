@@ -5,7 +5,16 @@ import { createSignal, createEffect, createMemo, onCleanup } from "solid-js"
 import type { CopilotQuotaInfo, GoQuotaBar, GoQuotaInfo } from "./types"
 import { log as logFn, DEBUG, logPath } from "./helpers/debug"
 import { isCopilotModel, isOpencodeGoModel, resolveActiveModel, buildUsageHeaderLabel, type ActiveModelInfo } from "./helpers/model"
-import { buildProgressBar, getUsageColor, getQuotaLabel, formatDuration } from "./helpers/format"
+import {
+  buildProgressBar,
+  getUsageColor,
+  getProjectionColor,
+  getQuotaLabel,
+  formatDuration,
+  DEFAULT_USAGE_SUCCESS_COLOR,
+  DEFAULT_USAGE_WARNING_COLOR,
+  type UsageStatusColors,
+} from "./helpers/format"
 import { splitCost } from "./helpers/cost"
 import { projectBurnRate, MIN_ELAPSED_DAYS } from "./helpers/projection"
 import { getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "./helpers/dates"
@@ -13,6 +22,7 @@ import { appendFileSync } from "node:fs"
 import { createLoadGuard } from "./wlib/src/core/reload"
 import { fetchQuotaInfo, fetchGoQuota, getGoAuth, withGuard } from "./quota"
 import { resolveThemeColors } from "./wlib/src/core/theme"
+import type { ThemeColorValue } from "./wlib/src/core/theme"
 import { PLUGIN_VERSION } from "./version"
 
 const log = logFn
@@ -271,7 +281,7 @@ function useQuotaFetching(props: { api: TuiPluginApi; sessionID: string; githubT
 
 // ─── Sidebar component ────────────────────────────────────────────────────────
 
-function renderProjectionLine(usedPct: number, muted: string) {
+function renderProjectionLine(usedPct: number, muted: ThemeColorValue, statusColors: Pick<UsageStatusColors, "success" | "red">) {
   if (usedPct <= 0) return null
   const elapsedDays = getDayOfMonth()
   const totalDays = getDaysInMonth()
@@ -281,7 +291,7 @@ function renderProjectionLine(usedPct: number, muted: string) {
     return <text fg={muted}>calculating projection... {n} {n === 1 ? "day" : "days"} to show</text>
   }
   const proj = projectBurnRate(usedPct, elapsedDays, totalDays)
-  return proj ? <text fg={proj.pct > 100 ? "#ef4444" : "#22c55e"}>{Math.round(proj.pct)}% projected by {endLabel}</text> : null
+  return proj ? <text fg={getProjectionColor(proj.pct, statusColors)}>{Math.round(proj.pct)}% projected by {endLabel}</text> : null
 }
 
 /**
@@ -289,7 +299,7 @@ function renderProjectionLine(usedPct: number, muted: string) {
  * explicitly unavailable — never as a fake `0%` with an empty bar. A present
  * window with a legitimate 0% is rendered normally.
  */
-function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: string }) {
+function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: ThemeColorValue; statusColors: UsageStatusColors }) {
   if (!props.bar) {
     return (
       <>
@@ -298,7 +308,7 @@ function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: st
       </>
     )
   }
-  const color = getUsageColor(props.bar.usagePercent)
+  const color = getUsageColor(props.bar.usagePercent, props.statusColors)
   return (
     <>
       <text fg={props.muted}>{props.label}</text>
@@ -514,7 +524,14 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
     return (used / quota.entitlement) * 100
   })
 
-  const usageColor = createMemo(() => getUsageColor(usagePercentage()))
+  const { fg, muted, red, success, warning } = resolveThemeColors(props.api.theme.current)
+  const statusColors: UsageStatusColors = {
+    success: success ?? DEFAULT_USAGE_SUCCESS_COLOR,
+    warning: warning ?? DEFAULT_USAGE_WARNING_COLOR,
+    red,
+  }
+
+  const usageColor = createMemo(() => getUsageColor(usagePercentage(), statusColors))
 
   const hasActiveModel = createMemo(() => !!activeModelInfo())
 
@@ -533,8 +550,6 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
   })
 
   log("UsageSidebar: render, hasActiveModel:", hasActiveModel(), "activeModel:", currentModel())
-
-  const { fg, muted } = resolveThemeColors(props.api.theme.current)
 
   return (
     <box flexDirection="column" gap={0}>
@@ -556,9 +571,9 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
             <>
               <text fg={muted}>Monthly quota</text>
               {!hasToken ? (
-                <text fg="#eab308">No token provided (set GITHUB_TOKEN)</text>
+                <text fg={warning ?? DEFAULT_USAGE_WARNING_COLOR}>No token provided (set GITHUB_TOKEN)</text>
               ) : quotaInfo()?.unlimited ? (
-                <text fg="#22c55e">Unlimited</text>
+                <text fg={success ?? DEFAULT_USAGE_SUCCESS_COLOR}>Unlimited</text>
               ) : quotaInfo() ? (
                 <box flexDirection="column" gap={0}>
                   <text fg={usageColor()}>{usagePercentage().toFixed(1)}% used</text>
@@ -566,7 +581,7 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
                   <text fg="#ffffff">
                     {(quotaInfo()!.entitlement - quotaInfo()!.remaining).toLocaleString()} / {quotaInfo()!.entitlement.toLocaleString()} {getQuotaLabel(quotaInfo()!)}
                   </text>
-                  {renderProjectionLine(usagePercentage(), muted)}
+                  {renderProjectionLine(usagePercentage(), muted, statusColors)}
                 </box>
               ) : !quotaInfo() && quotaLoading() ? (
                 <text fg="#888888">Loading...</text>
@@ -581,10 +596,10 @@ function UsageSidebar(props: { api: TuiPluginApi; session_id: string }) {
                 <text fg="#888888">Loading...</text>
               ) : goQuota() ? (
                 <box flexDirection="column" gap={0}>
-                  <GoQuotaWindow label="Rolling (5h)" bar={goQuota()!.rolling} muted={muted} />
-                  <GoQuotaWindow label="Weekly" bar={goQuota()!.weekly} muted={muted} />
-                  <GoQuotaWindow label="Monthly" bar={goQuota()!.monthly} muted={muted} />
-                  {goQuota()!.monthly ? renderProjectionLine(goQuota()!.monthly!.usagePercent, muted) : null}
+                  <GoQuotaWindow label="Rolling (5h)" bar={goQuota()!.rolling} muted={muted} statusColors={statusColors} />
+                  <GoQuotaWindow label="Weekly" bar={goQuota()!.weekly} muted={muted} statusColors={statusColors} />
+                  <GoQuotaWindow label="Monthly" bar={goQuota()!.monthly} muted={muted} statusColors={statusColors} />
+                  {goQuota()!.monthly ? renderProjectionLine(goQuota()!.monthly!.usagePercent, muted, statusColors) : null}
                 </box>
               ) : (
                 <box flexDirection="column" gap={0}>
