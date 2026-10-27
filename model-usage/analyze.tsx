@@ -1,5 +1,13 @@
 /** @jsxImportSource @opentui/solid */
+/**
+ * DEPRECATED — OpenCode v1 `/analyze` dialog.
+ *
+ * Retained for the transition window only; the supported path is the v2 dialog
+ * in `./v2/analyze.tsx` (OpenCode 2.0.27). Uses the v1 `TuiPluginApi` plus the
+ * deprecated `createV1Host` wlib adapter; never loaded by the v2 runtime.
+ */
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { WlibHost } from "./wlib/src/host/types"
 import { onMount, onCleanup, createSignal, createMemo, createEffect } from "solid-js"
 import { log } from "./helpers/debug"
 import { buildBar, fmt, truncateLabel, fmtCompact, fmtCost } from "./helpers/format"
@@ -23,7 +31,7 @@ import { CopiedFlash } from "./wlib/src/ui/copied-flash"
 import { buildAnalyzeExport, buildAnalyzeExportData, ANALYZE_EXPORT_FORMATS } from "./helpers/export/analyze"
 import { PLUGIN_NAME, PLUGIN_VERSION } from "./version"
 
-export function openAnalyze(api: TuiPluginApi, sessionID: string) {
+export function openAnalyze(api: TuiPluginApi, host: WlibHost, sessionID: string) {
   if (!sessionID) {
     api.ui.dialog.replace(() => {
       onMount(() => { api.ui.dialog.setSize("medium") })
@@ -246,7 +254,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
   // ── Reactive dialog ──────────────────────────────────────────────
   api.ui.dialog.replace(() => {
     // Desired large/40 — falls back to fit the terminal (never cut off).
-    const dialogSizing = useDialogSizing(api, { size: "large", maxHeight: 40 })
+    const dialogSizing = useDialogSizing(host, { size: "large", maxHeight: 40 })
     log(
       "[mu:analyze] dialog open",
       `renderer=${api.renderer ? "present" : "missing"}`,
@@ -309,7 +317,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
     // The export controller must be created inside this Solid owner so its
     // createEffect (priority-2 key layer) and onCleanup (flash timeout) are
     // disposed when the dialog closes.
-    exporter = createExportController(api, exportable, { name: "analyze" })
+    exporter = createExportController(host, exportable, { name: "analyze" })
 
     // ── Central key dispatcher ──────────────────────────────────────
     // Single entry point for every key: routes the export overlay first,
@@ -376,7 +384,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
     onMount(() => {
       // Register dialog key layer — bindings come from analyzeBindings
       // (shared with the HelpOverlay via buildHelpRows).
-      cleanupKeyLayer = registerDialogKeyLayer(api, {
+      cleanupKeyLayer = registerDialogKeyLayer(host, {
         priority: 1,
         bindings: analyzeBindings,
         commands: [
@@ -851,7 +859,7 @@ export function openAnalyze(api: TuiPluginApi, sessionID: string) {
   })
 }
 
-export function registerAnalyzeCommand(api: TuiPluginApi) {
+export function registerAnalyzeCommand(api: TuiPluginApi, host: WlibHost) {
   api.keymap.registerLayer({
     commands: [
       {
@@ -867,7 +875,7 @@ export function registerAnalyzeCommand(api: TuiPluginApi) {
             ? (route as any).params?.sessionID
             : undefined
 
-          openAnalyze(api, resolvedSessionID)
+          openAnalyze(api, host, resolvedSessionID)
         },
       },
     ],

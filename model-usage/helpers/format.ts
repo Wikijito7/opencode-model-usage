@@ -1,3 +1,5 @@
+import type { ThemeColorValue } from "../wlib/src/core/theme"
+
 /** Maximum character length for message previews in hotspot UI. */
 export const PREVIEW_MAX_LEN = 40
 
@@ -25,11 +27,66 @@ export function buildProgressBar(percentage: number, width: number = 20): string
   return "\u2588".repeat(filled) + "\u2591".repeat(empty)
 }
 
-export function getUsageColor(percentage: number): string {
-  if (percentage > 100) return "#ef4444"
-  if (percentage > 90) return "#ef4444"
-  if (percentage > 75) return "#eab308"
-  return "#22c55e"
+/** Stable legacy status colors used when the host palette omits semantic tokens. */
+export const DEFAULT_USAGE_SUCCESS_COLOR = "#22c55e"
+export const DEFAULT_USAGE_WARNING_COLOR = "#eab308"
+export const DEFAULT_USAGE_DANGER_COLOR = "#ef4444"
+
+/** First percentage considered warning (exclusive, matching the v1 business rule). */
+export const USAGE_WARNING_THRESHOLD = 75
+/** First percentage considered danger (exclusive, matching the v1 business rule). */
+export const USAGE_DANGER_THRESHOLD = 90
+
+/**
+ * Theme tokens for quota status. Values are `ThemeColorValue`s
+ * (`string | RGBA`) and are returned untouched — never string-coerced — so
+ * host RGBA objects survive.
+ */
+export interface UsageStatusColors {
+  success?: ThemeColorValue
+  warning?: ThemeColorValue
+  red?: ThemeColorValue
+}
+
+const LEGACY_USAGE_COLORS: UsageStatusColors = {
+  success: DEFAULT_USAGE_SUCCESS_COLOR,
+  warning: DEFAULT_USAGE_WARNING_COLOR,
+  red: DEFAULT_USAGE_DANGER_COLOR,
+}
+
+/**
+ * Map a usage percentage to its status color.
+ *
+ * Thresholds are the unchanged v1 business rules (strict `>`):
+ * healthy ≤75, warning >75 through 90, danger >90. Callers on a themed host
+ * pass the resolved semantic palette; each missing token independently falls
+ * back to its legacy hex default, so a partial v1 palette is safe.
+ */
+export function getUsageColor(
+  percentage: number,
+  colors: UsageStatusColors = LEGACY_USAGE_COLORS,
+): ThemeColorValue {
+  if (percentage > USAGE_DANGER_THRESHOLD) {
+    return colors.red ?? DEFAULT_USAGE_DANGER_COLOR
+  }
+  if (percentage > USAGE_WARNING_THRESHOLD) {
+    return colors.warning ?? DEFAULT_USAGE_WARNING_COLOR
+  }
+  return colors.success ?? DEFAULT_USAGE_SUCCESS_COLOR
+}
+
+/**
+ * Map a projected month-end percentage to its status color: success while the
+ * projection stays within the quota (≤100), danger when it overshoots it.
+ * Missing tokens fall back per-token to the stable legacy colors.
+ */
+export function getProjectionColor(
+  projectedPercentage: number,
+  colors: Pick<UsageStatusColors, "success" | "red"> = LEGACY_USAGE_COLORS,
+): ThemeColorValue {
+  return projectedPercentage > 100
+    ? (colors.red ?? DEFAULT_USAGE_DANGER_COLOR)
+    : (colors.success ?? DEFAULT_USAGE_SUCCESS_COLOR)
 }
 
 export function formatDuration(seconds: number): string {

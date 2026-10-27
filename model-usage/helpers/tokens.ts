@@ -1,5 +1,14 @@
-import type { Part } from "@opencode-ai/sdk/v2"
 import { log } from "./debug"
+
+/**
+ * Structural message-part shape for token estimation. Kept local so this pure
+ * helper stays host/version independent (v1 `Part` and v2 adapter `LegacyPart`
+ * are both assignable).
+ */
+export interface TextPartLike {
+  type?: string
+  text?: string
+}
 
 export function estimateTokens(text: string): number {
   if (!text || text.length === 0) return 0
@@ -10,7 +19,7 @@ export function estimateTokens(text: string): number {
  * Estimates the visible assistant text token count from message parts using char/4.
  * Excludes tool calls/results and other non-text parts to stay consistent with ASSISTANT category.
  */
-export function estimateVisibleOutputTokens(parts: readonly Part[] | undefined | null): number {
+export function estimateVisibleOutputTokens(parts: readonly TextPartLike[] | undefined | null): number {
   if (!parts) {
     log("estimateVisibleOutputTokens: no parts provided, returning 0")
     return 0

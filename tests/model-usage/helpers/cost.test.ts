@@ -321,6 +321,46 @@ describe("splitCost with cache.read pricing", () => {
     expect(result.inputCost + result.outputCost).toBeCloseTo(0.15, 6)
   })
 
+  it("flows through the price-weighted split when only a cache.read price is set", () => {
+    // A cache-read-only tier (input=0, output=0, cache.read=$100/M) is still
+    // pricing: it must NOT be treated as unpriced and skipped.
+    // deltaInput=100, deltaCacheRead=100, deltaOutput=100, deltaCost=$9
+    // inputWeight  = (100*0 + 100*100)/1e6 = 0.01
+    // outputWeight = (100*0)/1e6 = 0
+    // totalWeight  = 0.01 → all cost lands on input, none on output
+    const result = splitCost(100, 100, 100, 9, "cache-only-model", [
+      {
+        id: "test",
+        name: "Test",
+        models: {
+          "cache-only-model": {
+            cost: { input: 0, output: 0, cache: { read: 100 } },
+          },
+        },
+      },
+    ])
+    expect(result.inputCost).toBeCloseTo(9, 10)
+    expect(result.outputCost).toBeCloseTo(0, 10)
+  })
+
+  it("still falls back to a token-proportional split when a tier is truly unpriced", () => {
+    // input=0, output=0, no cache.read → genuinely unpriced.
+    // total tokens = 100+0+100 = 200 → 0.5 each of $10.
+    const result = splitCost(100, 0, 100, 10, "free-model", [
+      {
+        id: "test",
+        name: "Test",
+        models: {
+          "free-model": {
+            cost: { input: 0, output: 0 },
+          },
+        },
+      },
+    ])
+    expect(result.inputCost).toBeCloseTo(5, 10)
+    expect(result.outputCost).toBeCloseTo(5, 10)
+  })
+
   it("ignores cacheReadPrice when cache.read is 0", () => {
     // deltaInput=500, deltaCacheRead=0, deltaOutput=500, deltaCost=$0.50
     // cacheReadPrice=0, inputPrice=$10/M, outputPrice=$30/M

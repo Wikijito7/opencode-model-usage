@@ -41,7 +41,7 @@ export function computeModelsTabLayout(stats: ModelStat[]): { sortedStats: Model
  * rawPromptTokens === 0) which would inflate switches with title-model
  * noise.
  */
-export function countModelSwitches(messages: any[]): number {
+export function countModelSwitches(messages: readonly any[]): number {
   let lastModelKey = ""
   let switches = 0
 
