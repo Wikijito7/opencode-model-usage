@@ -119,35 +119,36 @@ Feature-specific serializers (usage, analyze, …) live in the consuming plugin,
 
 ## Submodule upkeep
 
-- **Current pin: `ff473a1545dd4750e28c7ec008d3c6ed5d23802e` (short `ff473a1`)** —
-  "Added success and warning semantic theme colors": adds optional
-  `success`/`warning` to the base `ThemePalette`, narrows them (plus
-  `selectedText`) to required on `SemanticThemePalette`, adds
+- **Current pin: `a84759066ee6071f5c312d4cfcc543091f5141c3` (short `a847590`)** —
+  "Added OpenCode 2.0 host adapters (#6)": the merged wlib `main` commit. It
+  carries the v1/v2 `WlibHost` adapters and the success/warning theme support:
+  optional `success`/`warning` on the base `ThemePalette`, narrowed to required
+  (with `selectedText`) on `SemanticThemePalette`, plus
   `ThemePaletteFallbacks.success`/`.warning` and
   `THEME_DEFAULTS.success`/`.warning` (`#22c55e` / `#eab308`), and maps
   `text.feedback.success.base` / `text.feedback.warning.base` in the v2 resolver
   (v1 reads `theme.success` / `theme.warning`).
-- **Publish status (read before bumping):** the published remote is
-  `opencode-wlib` branch `v2` at **`95167829c39cd4155bb250ff1801f0e25527f571`**
-  (short `9516782`) — GitHub MCP verification, not a local tracking ref. Local
-  `ff473a1` is **one commit ahead of that and unpublished**. Ignore the consumer
-  submodule's `origin/v2` tracking ref: it is **stale at `5cab3e1`** and is not
-  the actual remote state. The parent gitlink is also not yet committed at the
-  new value: `HEAD` still records `9516782` while the submodule worktree is
-  checked out at `ff473a1`, so that pointer change is a pending, uncommitted diff
-  in `model-usage/wlib`. So `9516782` IS the published tip and another clone can
-  fetch it; only `ff473a1` is unfetchable. Recovery step 3 below lands on
-  `9516782` because of the uncommitted gitlink, not because the pin is unpublished.
-- Bump: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib merge origin/v2` at repo root, then commit the pointer change. Do **not** use bare `git submodule update --remote`: `.gitmodules` sets no `branch`, so `--remote` follows the submodule's remote HEAD (`origin/main`) — never the v2 pin.
-- The canonical branch is `origin/v2` — the pin is meant to track it (currently
-  one commit ahead of it, `ff473a1`, which is unpublished; `9516782` is published)
-  — **never
-  `origin/main`, and never any `reset --hard`**. If the submodule working tree is
-  dirty and the merge refuses:
+- **Publish status:** `a847590` is **published on `opencode-wlib` `main`** (it is
+  the current `origin/main` tip), so any clone can fetch it. Verify the remote
+  before bumping with `git -C model-usage/wlib fetch origin` and
+  `git -C model-usage/wlib rev-parse origin/main`.
+- **Chosen source branch:** this project pins the merged `main` lineage; future
+  maintenance follows the project's chosen v2 source branch (`origin/main` unless
+  the project deliberately retargets it). Never `git reset --hard` and never force.
+- Bump (safe): at repo root run
+  `git -C model-usage/wlib fetch origin`, then pin the exact commit with
+  `git -C model-usage/wlib checkout <commit-sha>` (or
+  `git -C model-usage/wlib merge --ff-only origin/main` when advancing to the
+  tip), and commit the gitlink change in the parent repo. Do **not** use bare
+  `git submodule update --remote`: `.gitmodules` sets no `branch`, so `--remote`
+  follows the submodule's remote HEAD and can move off the vetted pin
+  unpredictably. Confirm with `git submodule status` that the sole change is the
+  gitlink.
+- If the submodule working tree is dirty and the operation refuses:
   1. **Inspect first:** `git -C model-usage/wlib status` to see exactly what is modified/untracked.
-  2. **Preserve the work — never discard it:** commit it on the submodule branch, or `git -C model-usage/wlib stash push -u -m wlib-pre-v2`.
-  3. **Recover to the parent gitlink:** `git submodule update --init --force model-usage/wlib` (checks out the commit the parent repo pins). With the current pending diff this lands on `9516782`, not `ff473a1` — confirm with `git submodule status` before assuming the pin is intact.
-  4. **Advance only when clean:** `git -C model-usage/wlib fetch origin && git -C model-usage/wlib merge --ff-only origin/v2`, then restore any stash with `git -C model-usage/wlib stash pop`. This cannot reach `ff473a1` until it is published to `origin/v2`.
+  2. **Preserve the work — never discard it:** commit it on the submodule branch, or `git -C model-usage/wlib stash push -u -m wlib-pre-bump`.
+  3. **Recover to the parent gitlink:** `git submodule update --init --force model-usage/wlib` (checks out the commit the parent repo pins) — confirm with `git submodule status` before assuming the pin is intact.
+  4. **Advance only when clean:** `git -C model-usage/wlib fetch origin` then checkout the intended commit (or `merge --ff-only` the chosen source branch), and restore any stash with `git -C model-usage/wlib stash pop`.
   Never run a destructive reset (`git reset --hard origin/main`, `origin/v2`, or bare) — it discards local work and can check out the wrong lineage.
 - Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).
 - wlib source lives in the `opencode-wlib` repo — never edit its files only inside the submodule; upstream changes there first.
