@@ -14,7 +14,58 @@
  *   back to a token-proportional split when no pricing is found.
  */
 
+import type { ThemeColorValue } from "../wlib/src/core/theme"
 import type { LegacyMessage } from "./message-adapter"
+
+// ─── Quota status theme colors (pure) ─────────────────────────────────────────
+//
+// Maps a quota percentage to a semantic theme token so the v2 sidebar follows
+// the active theme instead of hardcoding hex values. Thresholds match the v1
+// `helpers/format.ts:getUsageColor` business rules exactly (strict `>`):
+// healthy ≤75, warning >75 through 90, danger >90.
+//
+// Colors are `ThemeColorValue`s (`string | RGBA`) and are always passed through
+// untouched — never string-coerced — so the host's RGBA objects survive.
+
+/** Semantic tokens used for quota status. `success`/`warning` are v2 tokens. */
+export interface UsageStatusColors {
+  success: ThemeColorValue
+  warning: ThemeColorValue
+  red: ThemeColorValue
+}
+
+/** First percentage considered warning (exclusive, matching v1). */
+export const USAGE_WARNING_THRESHOLD = 75
+/** First percentage considered danger (exclusive, matching v1). */
+export const USAGE_DANGER_THRESHOLD = 90
+
+/**
+ * Map a usage percentage to its semantic status token.
+ *
+ * Mirrors `helpers/format.ts:getUsageColor`'s strict thresholds:
+ * `>90` red, `>75` warning, otherwise success.
+ */
+export function getUsageThemeColor(
+  percentage: number,
+  colors: UsageStatusColors,
+): ThemeColorValue {
+  if (percentage > USAGE_DANGER_THRESHOLD) return colors.red
+  if (percentage > USAGE_WARNING_THRESHOLD) return colors.warning
+  return colors.success
+}
+
+/**
+ * Map a projected month-end percentage to a semantic status token.
+ *
+ * Mirrors the v1 projection line: success while the projection stays within
+ * the quota (≤100), red when it overshoots it.
+ */
+export function getProjectionThemeColor(
+  projectedPercentage: number,
+  colors: Pick<UsageStatusColors, "success" | "red">,
+): ThemeColorValue {
+  return projectedPercentage > 100 ? colors.red : colors.success
+}
 
 /** Structural view of a v2 `ModelInfo` (only pricing is consumed). */
 export interface ModelLike {

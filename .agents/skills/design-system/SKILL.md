@@ -17,9 +17,17 @@ description: "IMPORTANT: Load when building or reviewing dialog UI, overlays, or
 
 ## Theme palette (from `wlib/src/core/theme.ts` `resolveThemeColors` / `resolveSemanticTheme`)
 
-- Keys: `fg`, `muted`, `red`, `primary`, `selectedText` (may be `undefined`), `background`, `panel`.
+- Keys: `fg`, `muted`, `red`, `primary`, `success`, `warning`, `selectedText` (may be `undefined`), `background`, `panel`.
+- `success` / `warning` are semantic feedback tokens: optional on the loose `ThemePalette` (source-compat) and **required** on the v2 `SemanticThemePalette`. Both resolvers populate them at runtime; they map from `text.feedback.success.base` / `text.feedback.warning.base`, falling back to `#22c55e` / `#eab308`.
 - There is NO `border`, `secondary`, `highlight`, or `bg` key.
 - Values are `ThemeColorValue` (`string | RGBA`) — pass through as-is, never string-coerce.
+
+## Quota status colors (v2 sidebar, settled)
+
+- Use semantic tokens, not hardcoded hex: `success` for healthy usage (≤75%), `warning` for >75% through 90%, `red` for >90%. The comparisons are strict `>`, matching v1 `helpers/format.ts:getUsageColor`.
+- Projection line: `success` while projected usage stays ≤100%, `red` above 100%.
+- `Unlimited` uses `success`; `No token provided` uses `warning`.
+- Loading, missing data, and fetch errors stay `muted` (neutral), never a status color.
 
 ## v2 semantic theme resolution (settled)
 

@@ -46,7 +46,7 @@ All modules live under `src/core` (pure/host-agnostic) or `src/ui` (SolidJS).
 | `core/system` | `writeSystemSnapshot` / `readSystemSnapshot` (final system sidecar), `isTitleGenerator`, `estimateTokens` |
 | `core/scroll` | `makeScrollState` (up/down/page, overflow tracking) |
 | `core/keys` | `registerDialogKeyLayer(host, config)` — defaults the v2 layer `mode` to `"global"` |
-| `core/theme` | `resolveThemeColors` (v1/loose), `resolveSemanticTheme` (v2 semantic tokens) |
+| `core/theme` | `resolveThemeColors` (v1/loose), `resolveSemanticTheme` (v2 semantic tokens, incl. `success`/`warning` + `THEME_DEFAULTS`) |
 | `core/log` | `createLog` (debug-gated file logging) |
 | `core/reload` | `createLoadGuard` (stale-fetch guard) |
 | `core/clipboard` | `writeClipboard` (+ candidate resolution, OSC 52) |
@@ -73,6 +73,32 @@ values (`"transparent"` or zero-alpha RGBA) are treated as absent and skipped
 (the default theme paints only `focused`); non-transparent RGBA objects are passed
 through by identity.
 
+`SemanticThemePalette` narrows **three** fields to required, always-defined
+values: `selectedText`, `success` and `warning`.
+
+- `success` / `warning` (semantic status colors) resolve from
+  `text.feedback.success.base` / `text.feedback.warning.base` with the same
+  visible-color validation as the rest of v2: a transparent/zero-alpha token is
+  skipped and a non-transparent `RGBA` is passed through by identity (never
+  string-coerced), falling back to `THEME_DEFAULTS.success = "#22c55e"` /
+  `THEME_DEFAULTS.warning = "#eab308"`.
+- On the base `ThemePalette` they are **optional properties** (source
+  compatibility: existing `ThemePalette` literals and hand-written
+  `WlibHost<ThemePalette>` implementations keep compiling). Both resolvers still
+  populate them at runtime. When reading through the base type, use
+  `palette.success ?? THEME_DEFAULTS.success`.
+- The v1 loose resolver (`resolveThemeColors`) maps `theme.success` /
+  `theme.warning`, then the caller's `ThemePaletteFallbacks`, then the same
+  defaults. It does **not** read the nested `text.feedback.*` tokens.
+- Base `selectedText` is a **required property whose value may be
+  `ThemeColorValue | undefined`** (v1 can leave it undefined); only the v2
+  `SemanticThemePalette` guarantees it is defined and visible.
+
+Use `success`/`warning` for status text instead of abusing `primary`/`fg` — e.g.
+quota health: `success` ≤75%, `warning` >75% through 90%, `red` >90% (strict
+`>`, matching v1 `getUsageColor`). Read them from the v2 host (`host.theme()`),
+not from the v1 `ThemePalette` surface.
+
 ## Export foundation (reference)
 
 The `export` module is the generic export CONTRACT, not any feature's serializers:
@@ -93,13 +119,35 @@ Feature-specific serializers (usage, analyze, …) live in the consuming plugin,
 
 ## Submodule upkeep
 
-- Current pin: `5cab3e142d910f9931fa6d9253f61ed35a554726` (canonical v2 commit — `WlibHost` + `src/host/{v1,v2}`; restricts the export error result to a single `Close` action).
+- **Current pin: `ff473a1545dd4750e28c7ec008d3c6ed5d23802e` (short `ff473a1`)** —
+  "Added success and warning semantic theme colors": adds optional
+  `success`/`warning` to the base `ThemePalette`, narrows them (plus
+  `selectedText`) to required on `SemanticThemePalette`, adds
+  `ThemePaletteFallbacks.success`/`.warning` and
+  `THEME_DEFAULTS.success`/`.warning` (`#22c55e` / `#eab308`), and maps
+  `text.feedback.success.base` / `text.feedback.warning.base` in the v2 resolver
+  (v1 reads `theme.success` / `theme.warning`).
+- **Publish status (read before bumping):** the published remote is
+  `opencode-wlib` branch `v2` at **`95167829c39cd4155bb250ff1801f0e25527f571`**
+  (short `9516782`) — GitHub MCP verification, not a local tracking ref. Local
+  `ff473a1` is **one commit ahead of that and unpublished**. Ignore the consumer
+  submodule's `origin/v2` tracking ref: it is **stale at `5cab3e1`** and is not
+  the actual remote state. The parent gitlink is also not yet committed at the
+  new value: `HEAD` still records `9516782` while the submodule worktree is
+  checked out at `ff473a1`, so that pointer change is a pending, uncommitted diff
+  in `model-usage/wlib`. So `9516782` IS the published tip and another clone can
+  fetch it; only `ff473a1` is unfetchable. Recovery step 3 below lands on
+  `9516782` because of the uncommitted gitlink, not because the pin is unpublished.
 - Bump: `git -C model-usage/wlib fetch origin && git -C model-usage/wlib merge origin/v2` at repo root, then commit the pointer change. Do **not** use bare `git submodule update --remote`: `.gitmodules` sets no `branch`, so `--remote` follows the submodule's remote HEAD (`origin/main`) — never the v2 pin.
-- The canonical branch is `origin/v2` (the pin tracks it) — **never `origin/main`, and never any `reset --hard`**. If the submodule working tree is dirty and the merge refuses:
+- The canonical branch is `origin/v2` — the pin is meant to track it (currently
+  one commit ahead of it, `ff473a1`, which is unpublished; `9516782` is published)
+  — **never
+  `origin/main`, and never any `reset --hard`**. If the submodule working tree is
+  dirty and the merge refuses:
   1. **Inspect first:** `git -C model-usage/wlib status` to see exactly what is modified/untracked.
   2. **Preserve the work — never discard it:** commit it on the submodule branch, or `git -C model-usage/wlib stash push -u -m wlib-pre-v2`.
-  3. **Recover to the parent gitlink:** `git submodule update --init --force model-usage/wlib` (checks out the commit the parent repo pins).
-  4. **Advance only when clean:** `git -C model-usage/wlib fetch origin && git -C model-usage/wlib merge --ff-only origin/v2`, then restore any stash with `git -C model-usage/wlib stash pop`.
+  3. **Recover to the parent gitlink:** `git submodule update --init --force model-usage/wlib` (checks out the commit the parent repo pins). With the current pending diff this lands on `9516782`, not `ff473a1` — confirm with `git submodule status` before assuming the pin is intact.
+  4. **Advance only when clean:** `git -C model-usage/wlib fetch origin && git -C model-usage/wlib merge --ff-only origin/v2`, then restore any stash with `git -C model-usage/wlib stash pop`. This cannot reach `ff473a1` until it is published to `origin/v2`.
   Never run a destructive reset (`git reset --hard origin/main`, `origin/v2`, or bare) — it discards local work and can check out the wrong lineage.
 - Keep the deployed copy in sync via the `deploy` skill — it mirrors `model-usage/` (which includes `wlib/`).
 - wlib source lives in the `opencode-wlib` repo — never edit its files only inside the submodule; upstream changes there first.

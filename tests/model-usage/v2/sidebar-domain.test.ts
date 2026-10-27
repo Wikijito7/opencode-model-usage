@@ -5,8 +5,11 @@ import {
   splitAssistantCost,
   computeSidebarTotals,
   sumSidebarTotals,
+  getUsageThemeColor,
+  getProjectionThemeColor,
   type PricingEntry,
   type SidebarTotals,
+  type UsageStatusColors,
 } from "@model-usage/v2/sidebar-domain"
 import type { LegacyMessage } from "@model-usage/v2/message-adapter"
 
@@ -367,5 +370,56 @@ describe("sumSidebarTotals", () => {
       outputCost: 12,
     }
     expect(sumSidebarTotals([only])).toEqual(only)
+  })
+})
+
+
+// ─── quota status theme colors ───────────────────────────────────────────────
+
+describe("getUsageThemeColor", () => {
+  const colors: UsageStatusColors = {
+    success: "SENTINEL_SUCCESS",
+    warning: "SENTINEL_WARNING",
+    red: "SENTINEL_RED",
+  }
+
+  it("locks the strict >75 / >90 v2 boundaries", () => {
+    expect(getUsageThemeColor(75, colors)).toBe("SENTINEL_SUCCESS")
+    expect(getUsageThemeColor(75.1, colors)).toBe("SENTINEL_WARNING")
+    expect(getUsageThemeColor(90, colors)).toBe("SENTINEL_WARNING")
+    expect(getUsageThemeColor(90.1, colors)).toBe("SENTINEL_RED")
+    expect(getUsageThemeColor(100, colors)).toBe("SENTINEL_RED")
+    expect(getUsageThemeColor(100.1, colors)).toBe("SENTINEL_RED")
+  })
+
+  it("returns the original RGBA token object for every status band", () => {
+    const success = { r: 0.1, g: 0.8, b: 0.2, a: 1 }
+    const warning = { r: 0.9, g: 0.7, b: 0.1 }
+    const red = { r: 0.9, g: 0.1, b: 0.1, a: 1 }
+    const rgbaColors = { success, warning, red }
+
+    expect(getUsageThemeColor(0, rgbaColors)).toBe(success)
+    expect(getUsageThemeColor(80, rgbaColors)).toBe(warning)
+    expect(getUsageThemeColor(95, rgbaColors)).toBe(red)
+  })
+})
+
+describe("getProjectionThemeColor", () => {
+  const colors = { success: "SENTINEL_SUCCESS", red: "SENTINEL_RED" }
+
+  it("uses success at/below 100 and red above 100", () => {
+    expect(getProjectionThemeColor(0, colors)).toBe("SENTINEL_SUCCESS")
+    expect(getProjectionThemeColor(100, colors)).toBe("SENTINEL_SUCCESS")
+    expect(getProjectionThemeColor(100.1, colors)).toBe("SENTINEL_RED")
+    expect(getProjectionThemeColor(150, colors)).toBe("SENTINEL_RED")
+  })
+
+  it("returns the original RGBA token objects without coercion", () => {
+    const success = { r: 0.1, g: 0.8, b: 0.2, a: 1 }
+    const red = { r: 0.9, g: 0.1, b: 0.1 }
+    const rgbaColors = { success, red }
+
+    expect(getProjectionThemeColor(99.9, rgbaColors)).toBe(success)
+    expect(getProjectionThemeColor(101, rgbaColors)).toBe(red)
   })
 })

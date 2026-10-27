@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test"
-import { fmtCompact, fmtCostPerMillion } from "@model-usage/helpers/format"
+import { fmtCompact, fmtCostPerMillion, getUsageColor } from "@model-usage/helpers/format"
 
 // ─── fmtCompact ──────────────────────────────────────────────────────────────
 
@@ -58,5 +58,20 @@ describe("fmtCostPerMillion", () => {
 
   it("rounds up values needing rounding", () => {
     expect(fmtCostPerMillion(2.999)).toBe("$3.00/1M")
+  })
+})
+
+
+// ─── getUsageColor (v1 thresholds) ───────────────────────────────────────────
+
+describe("getUsageColor", () => {
+  it("locks the unchanged v1 green/yellow/red thresholds", () => {
+    expect(getUsageColor(0)).toBe("#22c55e")
+    expect(getUsageColor(75)).toBe("#22c55e")
+    expect(getUsageColor(75.1)).toBe("#eab308")
+    expect(getUsageColor(90)).toBe("#eab308")
+    expect(getUsageColor(90.1)).toBe("#ef4444")
+    expect(getUsageColor(100)).toBe("#ef4444")
+    expect(getUsageColor(150)).toBe("#ef4444")
   })
 })

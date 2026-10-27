@@ -14,7 +14,7 @@
 
 import type { Plugin } from "@opencode/plugin/tui"
 import type { WlibHost } from "../wlib/src/host/types"
-import type { ThemeColorValue } from "../wlib/src/core/theme"
+import type { SemanticThemePalette, ThemeColorValue } from "../wlib/src/core/theme"
 import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import type { CopilotQuotaInfo, GoQuotaBar, GoQuotaInfo } from "../types"
 import { log as logFn } from "../helpers/debug"
@@ -25,7 +25,15 @@ import { getDaysInMonth, getDayOfMonth, getMonthEndLabel } from "../helpers/date
 import { fetchQuotaInfo, fetchGoQuota, getGoAuth, withGuard } from "../quota"
 import { PLUGIN_VERSION } from "../version"
 import { toLegacyMessages } from "./message-adapter"
-import { toPricing, computeSidebarTotals, sumSidebarTotals, type SidebarTotals } from "./sidebar-domain"
+import {
+  toPricing,
+  computeSidebarTotals,
+  sumSidebarTotals,
+  getUsageThemeColor,
+  getProjectionThemeColor,
+  type SidebarTotals,
+  type UsageStatusColors,
+} from "./sidebar-domain"
 
 const log = logFn
 
@@ -131,30 +139,7 @@ function useQuotaFetching(props: {
 
 // ─── Rendering helpers ────────────────────────────────────────────────────────
 
-/** Theme tokens available for status colouring. The wlib palette has no warning/yellow token. */
-type StatusColorTokens = {
-  primary: ThemeColorValue
-  fg: ThemeColorValue
-  red: ThemeColorValue
-}
-
-/**
- * Map a usage percentage to an available theme token (v2 presentation layer).
- *
- * Mirrors `helpers/format.ts:getUsageColor`'s business thresholds exactly
- * (healthy ≤75, warning >75, danger >90) but emits semantic theme tokens
- * instead of hardcoded hex, so v2 colours follow the active theme. The palette
- * exposes no warning/yellow token, so the warning band uses `fg` — the
- * brightest neutral, visible without colliding with healthy (`primary`) or
- * danger (`red`).
- */
-function getUsageThemeColor(percentage: number, colors: StatusColorTokens): ThemeColorValue {
-  if (percentage > 90) return colors.red
-  if (percentage > 75) return colors.fg
-  return colors.primary
-}
-
-function renderProjectionLine(usedPct: number, muted: ThemeColorValue, red: ThemeColorValue, primary: ThemeColorValue) {
+function renderProjectionLine(usedPct: number, muted: ThemeColorValue, statusColors: UsageStatusColors) {
   if (usedPct <= 0) return null
   const elapsedDays = getDayOfMonth()
   const totalDays = getDaysInMonth()
@@ -164,14 +149,16 @@ function renderProjectionLine(usedPct: number, muted: ThemeColorValue, red: Them
     return <text fg={muted}>calculating projection... {n} {n === 1 ? "day" : "days"} to show</text>
   }
   const proj = projectBurnRate(usedPct, elapsedDays, totalDays)
-  return proj ? <text fg={proj.pct > 100 ? red : primary}>{Math.round(proj.pct)}% projected by {endLabel}</text> : null
+  return proj
+    ? <text fg={getProjectionThemeColor(proj.pct, statusColors)}>{Math.round(proj.pct)}% projected by {endLabel}</text>
+    : null
 }
 
 /**
  * Render a single Go quota window. A missing window (null bar) is shown as
  * explicitly unavailable — never as a fake `0%` with an empty bar.
  */
-function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: ThemeColorValue; statusColors: StatusColorTokens }) {
+function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: ThemeColorValue; statusColors: UsageStatusColors }) {
   if (!props.bar) {
     return (
       <>
@@ -192,7 +179,7 @@ function GoQuotaWindow(props: { label: string; bar: GoQuotaBar | null; muted: Th
   )
 }
 
-function UsageSidebar(props: { context: Plugin.Context; host: WlibHost; session_id: string }) {
+function UsageSidebar(props: { context: Plugin.Context; host: WlibHost<SemanticThemePalette>; session_id: string }) {
   log("UsageSidebar(v2): rendering! session_id:", props.session_id)
   const githubToken = process.env.GITHUB_TOKEN ?? ""
   const hasToken = !!githubToken
@@ -257,8 +244,8 @@ function UsageSidebar(props: { context: Plugin.Context; host: WlibHost; session_
     onCleanup(offCompaction)
   })
 
-  const { fg, muted, red, primary } = props.host.theme()
-  const statusColors: StatusColorTokens = { primary, fg, red }
+  const { fg, muted, red, success, warning } = props.host.theme()
+  const statusColors: UsageStatusColors = { success, warning, red }
 
   const usagePercentage = createMemo(() => {
     const quota = quotaInfo()
@@ -303,11 +290,10 @@ function UsageSidebar(props: { context: Plugin.Context; host: WlibHost; session_
             <>
               <text fg={muted}>Monthly quota</text>
               {!hasToken ? (
-                // Warning state: the palette has no warning/yellow token, so use
-                // `fg` (brightest neutral) rather than a hardcoded hex.
-                <text fg={fg}>No token provided (set GITHUB_TOKEN)</text>
+                // Warning state: the v2 palette exposes a semantic warning token.
+                <text fg={warning}>No token provided (set GITHUB_TOKEN)</text>
               ) : quotaInfo()?.unlimited ? (
-                <text fg={primary}>Unlimited</text>
+                <text fg={success}>Unlimited</text>
               ) : quotaInfo() ? (
                 <box flexDirection="column" gap={0}>
                   <text fg={usageColor()}>{usagePercentage().toFixed(1)}% used</text>
@@ -315,7 +301,7 @@ function UsageSidebar(props: { context: Plugin.Context; host: WlibHost; session_
                   <text fg={fg}>
                     {(quotaInfo()!.entitlement - quotaInfo()!.remaining).toLocaleString()} / {quotaInfo()!.entitlement.toLocaleString()} {getQuotaLabel(quotaInfo()!)}
                   </text>
-                  {renderProjectionLine(usagePercentage(), muted, red, primary)}
+                  {renderProjectionLine(usagePercentage(), muted, statusColors)}
                 </box>
               ) : !quotaInfo() && quotaLoading() ? (
                 <text fg={muted}>Loading...</text>
@@ -333,7 +319,7 @@ function UsageSidebar(props: { context: Plugin.Context; host: WlibHost; session_
                   <GoQuotaWindow label="Rolling (5h)" bar={goQuota()!.rolling} muted={muted} statusColors={statusColors} />
                   <GoQuotaWindow label="Weekly" bar={goQuota()!.weekly} muted={muted} statusColors={statusColors} />
                   <GoQuotaWindow label="Monthly" bar={goQuota()!.monthly} muted={muted} statusColors={statusColors} />
-                  {goQuota()!.monthly ? renderProjectionLine(goQuota()!.monthly!.usagePercent, muted, red, primary) : null}
+                  {goQuota()!.monthly ? renderProjectionLine(goQuota()!.monthly!.usagePercent, muted, statusColors) : null}
                 </box>
               ) : (
                 <box flexDirection="column" gap={0}>
