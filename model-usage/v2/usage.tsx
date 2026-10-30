@@ -32,6 +32,7 @@ import { sortModels, costPerMillion, type ModelSortKey } from "../helpers/models
 import { makeScrollState } from "../wlib/src/core/scroll"
 import { registerDialogKeyLayer, type KeyBinding } from "../wlib/src/core/keys"
 import { registerSlashCommand } from "../wlib/src/core/command"
+import { USAGE_COMMAND } from "./commands"
 import { buildHelpRows } from "../wlib/src/core/help"
 import { HelpOverlay } from "../wlib/src/ui/help-overlay"
 import { EXPORT_FORMATS, type Exportable } from "../wlib/src/core/export"
@@ -49,10 +50,12 @@ import { PLUGIN_NAME, PLUGIN_VERSION } from "../version"
 
 export function registerUsageCommand(context: Plugin.Context, host: WlibHost) {
   registerSlashCommand(host, {
-    name: "usage.show",
-    title: "Show Monthly Usage",
-    slashName: "usage",
-    key: { key: "ctrl+shift+u", desc: "Show Monthly Usage" },
+    // Namespaced id + slash: OpenCode v2 owns `usage.show` / `/usage` for its
+    // native Console-limits dialog, and the keymap dedupes by id (first wins).
+    name: USAGE_COMMAND.id,
+    title: USAGE_COMMAND.title,
+    slashName: USAGE_COMMAND.slash,
+    key: { key: USAGE_COMMAND.key, desc: USAGE_COMMAND.description },
     async run() {
       const dbPath = SQLITE_DB_PATH
       const now = new Date()

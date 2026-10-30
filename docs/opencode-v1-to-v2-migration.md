@@ -829,6 +829,18 @@ skills (§3.4, §3.6, §3.7, §9, §3.10):
   schema-aware v1/v2/hybrid, read-only, with per-family/newest-first hybrid
   selection and all-or-nothing fallback when the selected window has no rows —
   including the partial-migration tradeoff (§9).
+- **Native `/usage` collision (v2):** OpenCode v2 registers its own Console-limits
+  dialog as command id `usage.show` with slash `usage`
+  (`packages/tui/src/app.tsx`, `component/usage.tsx`; keybind default `none`).
+  `@opentui/keymap` dedupes reachable commands **by id, first registration
+  wins**, and the built-in layer registers before plugin `setup()`. Reusing the
+  id therefore makes the plugin's binding, palette entry and slash command
+  resolve to the native dialog. The v2 plugin now registers
+  `model-usage.usage.show` with slash `/model-usage` (id/slash centralised in
+  `model-usage/v2/commands.ts`, guarded by
+  `tests/model-usage/v2/commands.test.ts`); `Ctrl+Shift+U` is unchanged and v1
+  keeps `usage.show` / `/usage` (no native command exists there). Never register
+  an un-namespaced id in v2.
 
 ### 13.10 Same-root v1/v2 dual-generation entry
 
@@ -860,3 +872,41 @@ Source changes:
 Behavior is unchanged: `ModelUsageServerPlugin` and the v2 `setup` body are the
 same code as before; only their packaging (default object + helper file) changed.
 An isolated `$V2_HOME` is now **optional** and only separates user data.
+
+### 13.11 Known upstream limitation — v2 records $0 cost for OpenCode Go
+
+OpenCode v2 stores the cost the endpoint reports and treats a reported zero as
+authoritative (`packages/core/src/session/usage.ts`,
+`cost: usage?.cost === undefined ? calculateCost(...) : Money.USD.make(usage.cost)`),
+so a subscription provider that reports `0` is recorded as `cost: 0`.
+
+Measured on 2.2.3, session `ses_e726d4816ffeFKS76cCb6Ugzek`
+(`opencode-go/gpt-6-luna`): 25 assistant messages, `session_v2.cost = 0`,
+`tokens = { input: 72, output: 5532, reasoning: 24261, cache: { read: 1_319_320,
+write: 120_199 } }`. The same catalog rates v1 used ($0.10/$0.50 per 1M,
+$0.01 cache read, $0.125 cache write) put that turn at ≈**$0.043**, so real
+credit was spent while the row says zero. The same database's v1
+`message` rows for the same provider/model still carry non-zero cost (e.g.
+2026-10-27 `deepseek-v4.1-flash`, 2580 messages, $2.61), which isolates the
+change to v2's accounting rather than the Go API or the plugin.
+
+Consequences in the plugin (v2 only, by design — no local estimate is applied):
+sidebar "Cost estimation" reads `$0.00`, and `/model-usage` renders the model as
+`· free` because `ModelUsage.totalCost` comes straight from the stored rows
+(`model-usage/v2/usage.tsx`). v1 continues to show the real figure.
+
+Decision recorded: **do not estimate prices in the plugin.** Displaying a
+list-price estimate would invent a number the host did not bill and diverge from
+the exported/DB-visible cost. The fix belongs upstream in OpenCode's cost
+accounting. Revisit if/when the host falls back to catalog pricing when the
+provider reports zero.
+
+Upstream status (checked 2026-10-30): intentional, not a regression. Since
+#58562 (2.2.0) the endpoint-reported cost wins and zero is authoritative, so Go
+subscription usage records $0; 2.1.4 values were list-price estimates, not
+charges. Reports: #59627 (closed `not_planned`), #59634 (open, canonical desktop
+duplicate target), #59812 / #60052 (closed as duplicates), #60624 (open, flagged
+as a duplicate of #59634). Open feature request #59861 asks for an opt-in
+estimate, with PR #59864 adding `experimental.cost-estimate` — display-only, it
+does **not** change the recorded cost, so a plugin that reads the database keeps
+seeing `0` even after it lands.
