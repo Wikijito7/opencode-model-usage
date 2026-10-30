@@ -184,7 +184,20 @@ Cost estimation (price-weighted input/output split from API) plus provider-speci
 
 When the active provider exposes a monthly quota, the sidebar also projects month-end usage: `X% projected by <month end>` once at least 3 days of the month have elapsed (before that, `calculating projection...`).
 
-### `/usage` command (`Ctrl+Shift+U`)
+> **Known upstream limitation (OpenCode v2, OpenCode Go):** v2 stores the cost the
+> provider reports and treats a reported zero as authoritative
+> (`packages/core/src/session/usage.ts`), so Go subscription requests are recorded
+> as `cost: 0` even though they consume real credit. The sidebar and
+> `/model-usage` display that stored value, so Go cost/price reads **$0.00 /
+> free** in v2. v1 computed list prices and still shows the real figure. This is
+> not a plugin bug; the fix belongs in OpenCode's cost accounting.
+
+### `/model-usage` command (`Ctrl+Shift+U`)
+> **v2 only:** OpenCode v2 ships its own `/usage` command (`usage.show`) for OpenCode Console
+> limits. The keymap resolves commands by id and the host's registration wins, so the v2 plugin
+> registers `model-usage.usage.show` with the `/model-usage` slash. The `Ctrl+Shift+U` shortcut
+> is unchanged, and **v1 keeps `/usage`** (v1 has no native command to collide with).
+
 Per-model token and cost breakdown for any month, week, or day, queried from OpenCode's SQLite database. Progress bars show each model's share of the period; `o` cycles the sort between tokens, cost, and price. The total line shows the percent difference vs the previous period, and the current month shows an "on pace: $X by end of month" projection. Session/message counts for the period appear in the header when available.
 
 | Key | Action |
@@ -265,8 +278,9 @@ model-usage/                          # shared plugin directory (deploy → $HOM
 ├── server-setup.ts                   # v2 server setup helper (plain `setup` export; imported by the root server file)
 ├── v2/                               # v2 TUI implementation (host API 2.0.27)
 │   ├── sidebar.tsx                   # Usage sidebar widget (context.data)
-│   ├── usage.tsx                     # /usage dialog
+│   ├── usage.tsx                     # /model-usage dialog (v2; v1 keeps /usage)
 │   ├── analyze.tsx                   # /analyze dialog
+│   ├── commands.ts                   # v2 command ids/slashes (pure; avoids native collisions)
 │   ├── backend.ts                    # Historical-usage backend strategy (pure)
 │   ├── message-adapter.ts            # v2 SessionMessageInfo → legacy shape (pure)
 │   └── sidebar-domain.ts             # Sidebar token/cost aggregation (pure)
